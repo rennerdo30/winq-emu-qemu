@@ -27,6 +27,8 @@
 #include "ui/console.h"
 #include "ui/vgafont.h"
 #include "hw/core/qdev.h"
+
+uint32_t qemu_edid_refresh_rate_mhz;
 #include "qapi/error.h"
 #include "qapi/qapi-builtin-type-infos.h"
 #include "qapi/qapi-commands-ui.h"
@@ -1431,6 +1433,9 @@ bool qemu_display_find_default(DisplayOptions *opts)
 
 void qemu_display_early_init(DisplayOptions *opts)
 {
+    if (opts->has_refresh_rate && opts->refresh_rate) {
+        qemu_edid_refresh_rate_mhz = opts->refresh_rate;
+    }
     assert(opts->type < DISPLAY_TYPE__MAX);
     if (opts->type == DISPLAY_TYPE_NONE) {
         return;
