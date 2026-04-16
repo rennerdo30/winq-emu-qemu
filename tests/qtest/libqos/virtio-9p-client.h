@@ -735,4 +735,11 @@ void v9fs_rxattrwalk(P9Req *req, uint64_t *size);
 TStatRes v9fs_tstat(TStatOpt opt);
 void v9fs_rstat(P9Req *req, v9fs_stat *stat);
 
+#ifdef CONFIG_WIN32
+static inline uint32_t getuid(void)
+{
+    return 0;
+}
+#endif
+
 #endif
