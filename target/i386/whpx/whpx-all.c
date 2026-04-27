@@ -2295,6 +2295,15 @@ int whpx_vcpu_run(CPUState *cpu)
     struct whpx_breakpoint *stepped_over_bp = NULL;
     WhpxStepMode exclusive_step_mode = WHPX_STEP_NONE;
     int ret;
+    /*
+     * Cap the time we stay inside whpx_vcpu_run() before returning to
+     * the cpu-loop. A guest hammering MMIO / portio / CPUID / MSR exits
+     * (Vulkan submit storms, virtio-gpu doorbell writes) can otherwise
+     * keep us inside the inner loop long enough to delay timers, UI
+     * events, and other vCPUs - showing up as frame-pacing jitter.
+     */
+    const int64_t loop_deadline_us = 5000; /* 5 ms */
+    int64_t loop_start_us = g_get_monotonic_time();
 
     g_assert(bql_locked());
 
@@ -2785,6 +2794,17 @@ int whpx_vcpu_run(CPUState *cpu)
             vm_stop(RUN_STATE_PAUSED);
             bql_unlock();
             break;
+        }
+
+        /*
+         * If we've been spinning on cheap exits (MMIO/portio/cpuid/msr)
+         * for longer than the deadline, surface an EXCP_INTERRUPT so the
+         * cpu-loop can run timers, UI events, and other vCPUs.
+         */
+        if (!ret && exclusive_step_mode == WHPX_STEP_NONE &&
+            (g_get_monotonic_time() - loop_start_us) > loop_deadline_us) {
+            cpu->exception_index = EXCP_INTERRUPT;
+            ret = 1;
         }
 
     } while (!ret);
