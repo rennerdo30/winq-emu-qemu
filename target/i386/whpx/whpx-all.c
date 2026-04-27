@@ -3379,6 +3379,11 @@ int whpx_accel_init(AccelState *as, MachineState *ms)
          */
         synthetic_features.Bank0.TbFlushHypercalls = 1;
         synthetic_features.Bank0.EnableExtendedGvaRangesForFlushVirtualAddressList = 1;
+        /*
+         * Return hypercall output via registers instead of a guest-physical
+         * output page: saves one mapping fault per TLB-flush hypercall.
+         */
+        synthetic_features.Bank0.FastHypercallOutput = 1;
     }
 
     if (is_modern_os && whpx->hyperv_enlightenments_allowed) {
