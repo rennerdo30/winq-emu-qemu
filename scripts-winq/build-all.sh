@@ -30,7 +30,11 @@ BIN=$OUT/bin
 mkdir -p "$BIN/share"
 cp qemu-system-x86_64.exe qemu-img.exe "$BIN/"
 cp "$PREFIX"/bin/*.dll "$BIN/" 2>/dev/null || true
-cp -r pc-bios/keymaps "$BIN/share/" 2>/dev/null || true
+# Keymaps (VNC needs them): the ready-made ones from the source tree; the
+# build folder only has generated ones when xkbcommon is present.
+mkdir -p "$BIN/share/keymaps"
+cp "$QEMU_SRC"/pc-bios/keymaps/[a-z]* "$BIN/share/keymaps/"
+rm -f "$BIN/share/keymaps/meson.build"
 for f in bios-256k.bin kvmvapic.bin linuxboot_dma.bin vgabios-virtio.bin vgabios-stdvga.bin efi-virtio.rom efi-e1000e.rom; do
     cp "$QEMU_SRC/pc-bios/$f" "$BIN/share/" 2>/dev/null || true
 done
