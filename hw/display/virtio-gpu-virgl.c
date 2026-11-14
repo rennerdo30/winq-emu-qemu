@@ -75,6 +75,268 @@ virtio_gpu_virgl_find_resource(VirtIOGPU *g, uint32_t resource_id)
     return container_of(res, struct virtio_gpu_virgl_resource, base);
 }
 
+#ifdef _WIN32
+/*
+ * Windows has no dmabuf, so a blob scanout cannot be handed to the display
+ * as a texture (virtio_gpu_update_dmabuf is a stub there and the window
+ * stayed black). Show it through a plain 2D surface instead: a host copy of
+ * the blob's framebuffer, refreshed on every RESOURCE_FLUSH. Guest-backed
+ * blobs are read from their iovecs, host blobs through a renderer mapping.
+ */
+typedef struct VirglBlobShadow {
+    bool active;
+    uint32_t resource_id;
+    uint8_t *buf;
+    size_t len;
+    uint32_t offset;
+    void *map;
+} VirglBlobShadow;
+
+static VirglBlobShadow virgl_blob_shadow[VIRTIO_GPU_MAX_SCANOUTS];
+
+static void virgl_blob_shadow_unmap(VirglBlobShadow *s)
+{
+    if (s->map) {
+        virgl_renderer_resource_unmap(s->resource_id);
+        s->map = NULL;
+    }
+}
+
+static void virgl_blob_shadow_forget(uint32_t resource_id)
+{
+    int i;
+
+    for (i = 0; i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
+        VirglBlobShadow *s = &virgl_blob_shadow[i];
+
+        if (s->active && (!resource_id || s->resource_id == resource_id)) {
+            virgl_blob_shadow_unmap(s);
+            s->active = false;
+        }
+    }
+}
+
+/*
+ * A host blob the guest has mapped (RESOURCE_MAP_BLOB) is already mapped in
+ * QEMU, and virglrenderer refuses a second virgl_renderer_resource_map().
+ * Read through that mapping; it is looked up on every copy because the
+ * guest can unmap it.
+ */
+static uint8_t *virgl_blob_host_ptr(struct virtio_gpu_virgl_resource *res)
+{
+    if (res->mr) {
+        return memory_region_get_ram_ptr(res->mr);
+    }
+    return res->map_fixed;
+}
+
+static void virgl_blob_shadow_copy(VirtIOGPU *g, VirglBlobShadow *s)
+{
+    struct virtio_gpu_simple_resource *res;
+    uint8_t *src;
+
+    res = virtio_gpu_find_resource(g, s->resource_id);
+    if (!res) {
+        return;
+    }
+    if (res->iov_cnt) {
+        iov_to_buf(res->iov, res->iov_cnt, s->offset, s->buf, s->len);
+        return;
+    }
+    src = virgl_blob_host_ptr(container_of(res, struct virtio_gpu_virgl_resource, base));
+    if (!src) {
+        src = s->map;
+    }
+    if (src) {
+        memcpy(s->buf, src + s->offset, s->len);
+    }
+}
+
+/*
+ * Host blobs in GPU-only memory (the usual scanout of a Venus guest driver)
+ * cannot be read by the CPU. Import the blob's memory into GL instead
+ * (GL_EXT_memory_object_win32, opaque Win32 handle from virglrenderer) as a
+ * buffer, and copy it into a texture on the GPU on every flush. The texture
+ * goes to the display like a virgl scanout. Assumes a linear framebuffer,
+ * which the stride in SET_SCANOUT_BLOB describes.
+ */
+typedef struct VirglBlobGL {
+    bool active;
+    uint32_t resource_id;
+    GLuint mem, buf, tex;
+    uint32_t width, height, stride, offset;
+    GLenum format;
+    bool direct; /* the texture aliases the blob */
+} VirglBlobGL;
+
+static VirglBlobGL virgl_blob_gl[VIRTIO_GPU_MAX_SCANOUTS];
+
+static void virgl_blob_gl_release(VirglBlobGL *b)
+{
+    if (b->mem) {
+        virgl_renderer_force_ctx_0();
+        glDeleteTextures(1, &b->tex);
+        glDeleteBuffers(1, &b->buf);
+        glDeleteMemoryObjectsEXT(1, &b->mem);
+    }
+    memset(b, 0, sizeof(*b));
+}
+
+static void virgl_blob_gl_upload(VirglBlobGL *b)
+{
+    if (b->direct) {
+        return;
+    }
+    virgl_renderer_force_ctx_0();
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, b->buf);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, b->stride / 4);
+    glBindTexture(GL_TEXTURE_2D, b->tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, b->width, b->height, b->format,
+                    GL_UNSIGNED_BYTE, (void *)(uintptr_t)b->offset);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+static bool virgl_blob_gl_scanout(VirtIOGPU *g,
+                                  struct virtio_gpu_virgl_resource *res,
+                                  struct virtio_gpu_set_scanout_blob *ss,
+                                  struct virtio_gpu_framebuffer *fb)
+{
+    VirglBlobGL *b = &virgl_blob_gl[ss->scanout_id];
+    GLenum format;
+    void *handle = NULL;
+    uint64_t alloc_size = 0;
+    uint32_t flags = 0;
+    GLenum err;
+
+    switch (ss->format) {
+    case VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM:
+    case VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM:
+        format = GL_BGRA;
+        break;
+    case VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM:
+    case VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM:
+        format = GL_RGBA;
+        break;
+    default:
+        return false;
+    }
+    if (fb->stride % 4) {
+        return false;
+    }
+
+    if (b->mem && (b->resource_id != ss->resource_id ||
+                   b->width != ss->r.width || b->height != ss->r.height)) {
+        virgl_blob_gl_release(b);
+    }
+    virgl_renderer_force_ctx_0();
+    if (!b->mem) {
+        if (virgl_renderer_resource_export_win32_handle(ss->resource_id, &handle,
+                                                        &alloc_size, &flags)) {
+            return false;
+        }
+        while (glGetError() != GL_NO_ERROR) {
+        }
+        /*
+         * Default: the blob is a dedicated allocation of a linear image (the
+         * guest's scanout). GL only accepts such memory as the storage of a
+         * texture created the same way, not as a buffer (AMD's GL driver
+         * crashed on the buffer import). The texture then aliases the guest's
+         * framebuffer: nothing to copy. QEMU_BLOB_IMPORT=buffer keeps the
+         * buffer-plus-copy path for non-dedicated blobs.
+         */
+        const char *mode = g_getenv("QEMU_BLOB_IMPORT");
+        b->direct = (flags & VIRGL_RENDERER_WIN32_HANDLE_DEDICATED) &&
+                    !(mode && !strcmp(mode, "buffer"));
+        if (!alloc_size) {
+            alloc_size = res->base.blob_size;
+        }
+        info_report("virtio-gpu: blob %d: allocation %" PRIu64 " bytes (blob %"
+                    PRIu64 "), %s, %ux%u stride %u offset %u",
+                    ss->resource_id, alloc_size, res->base.blob_size,
+                    (flags & VIRGL_RENDERER_WIN32_HANDLE_DEDICATED) ? "dedicated" : "not dedicated",
+                    ss->width, ss->height, fb->stride, ss->offsets[0]);
+        glCreateMemoryObjectsEXT(1, &b->mem);
+        if (b->direct) {
+            GLint dedicated = GL_TRUE;
+            glMemoryObjectParameterivEXT(b->mem, GL_DEDICATED_MEMORY_OBJECT_EXT,
+                                         &dedicated);
+        }
+        glImportMemoryWin32HandleEXT(b->mem, alloc_size,
+                                     GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
+        CloseHandle(handle); /* GL keeps its own reference */
+        glGenTextures(1, &b->tex);
+        glBindTexture(GL_TEXTURE_2D, b->tex);
+        if (b->direct) {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_TILING_EXT, GL_LINEAR_TILING_EXT);
+            glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, GL_RGBA8, ss->width, ss->height,
+                                 b->mem, ss->offsets[0]);
+            if (format == GL_BGRA) { /* B8G8R8A8 memory read as RGBA8 */
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+            }
+        } else {
+            glCreateBuffers(1, &b->buf);
+            glNamedBufferStorageMemEXT(b->buf, res->base.blob_size, b->mem, 0);
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, ss->r.width, ss->r.height);
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        err = glGetError();
+        if (err != GL_NO_ERROR) {
+            error_report("virtio-gpu: GL import of blob %d failed (0x%x)",
+                         ss->resource_id, err);
+            virgl_blob_gl_release(b);
+            return false;
+        }
+        b->resource_id = ss->resource_id;
+        b->width = ss->r.width;
+        b->height = ss->r.height;
+        info_report("virtio-gpu: blob scanouts shown through a GL import (%s)",
+                    b->direct ? "texture" : "buffer copy");
+    }
+    b->stride = fb->stride;
+    b->offset = fb->offset;
+    b->format = format;
+    virgl_blob_gl_upload(b);
+    b->active = true;
+
+    qemu_console_resize(g->parent_obj.scanout[ss->scanout_id].con,
+                        ss->r.width, ss->r.height);
+    qemu_console_gl_scanout_texture(g->parent_obj.scanout[ss->scanout_id].con,
+                                    b->tex, true,
+                                    b->direct ? ss->width : ss->r.width,
+                                    b->direct ? ss->height : ss->r.height,
+                                    b->direct ? ss->r.x : 0,
+                                    b->direct ? ss->r.y : 0,
+                                    ss->r.width, ss->r.height, NULL);
+    return true;
+}
+
+/* The scanout shows something else now (or nothing). */
+static void virgl_blob_scanout_off(int idx)
+{
+    virgl_blob_shadow_unmap(&virgl_blob_shadow[idx]);
+    virgl_blob_shadow[idx].active = false;
+    virgl_blob_gl[idx].active = false;
+}
+
+/* A resource goes away: drop every copy and import of it. */
+static void virgl_blob_forget(uint32_t resource_id)
+{
+    int i;
+
+    virgl_blob_shadow_forget(resource_id);
+    for (i = 0; i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
+        if (virgl_blob_gl[i].mem && virgl_blob_gl[i].resource_id == resource_id) {
+            virgl_blob_gl_release(&virgl_blob_gl[i]);
+        }
+    }
+}
+#endif
+
 #if VIRGL_RENDERER_CALLBACKS_VERSION >= 4
 static void *
 virgl_get_egl_display(G_GNUC_UNUSED void *cookie)
@@ -457,6 +719,9 @@ virtio_gpu_virgl_resource_unref(VirtIOGPU *g,
     }
 #endif
 
+#ifdef _WIN32
+    virgl_blob_forget(res->base.resource_id);
+#endif
     virtio_gpu_disable_scanout_for_resource(g, res->base.resource_id);
 
     virgl_renderer_force_ctx_0();
@@ -575,6 +840,19 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
         if (g->parent_obj.scanout[i].resource_id != rf.resource_id) {
             continue;
         }
+#ifdef _WIN32
+        if (virgl_blob_shadow[i].active &&
+            virgl_blob_shadow[i].resource_id == rf.resource_id) {
+            virgl_blob_shadow_copy(g, &virgl_blob_shadow[i]);
+            qemu_console_update(g->parent_obj.scanout[i].con, rf.r.x, rf.r.y,
+                           rf.r.width, rf.r.height);
+            continue;
+        }
+        if (virgl_blob_gl[i].active &&
+            virgl_blob_gl[i].resource_id == rf.resource_id) {
+            virgl_blob_gl_upload(&virgl_blob_gl[i]);
+        }
+#endif
         virtio_gpu_rect_update(g, i, rf.r.x, rf.r.y, rf.r.width, rf.r.height);
     }
 }
@@ -629,6 +907,9 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
     }
 
     virtio_gpu_release_scanout_dmabuf(g, ss.scanout_id);
+#ifdef _WIN32
+    virgl_blob_scanout_off(ss.scanout_id);
+#endif
 
     qemu_console_resize(g->parent_obj.scanout[ss.scanout_id].con,
                         ss.r.width, ss.r.height);
@@ -1029,6 +1310,9 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
     }
 
     if (ss.resource_id == 0) {
+#ifdef _WIN32
+        virgl_blob_scanout_off(ss.scanout_id);
+#endif
         virtio_gpu_disable_scanout(g, ss.scanout_id);
         return;
     }
@@ -1059,6 +1343,74 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
     }
 
     g->parent_obj.enable = 1;
+#ifdef _WIN32
+    {
+        VirglBlobShadow *sh = &virgl_blob_shadow[ss.scanout_id];
+        struct virtio_gpu_scanout *so = &g->parent_obj.scanout[ss.scanout_id];
+        size_t len = (size_t)fb.stride * ss.r.height;
+        void *map = NULL;
+        uint64_t map_size = 0;
+        uint8_t *old_buf = NULL;
+        pixman_image_t *img;
+
+        virgl_blob_shadow_unmap(sh);
+        if (!res->base.iov_cnt && virgl_blob_host_ptr(res)) {
+            if (fb.offset + len > res->base.blob_size) {
+                cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+                return;
+            }
+        } else if (!res->base.iov_cnt) {
+            if (virgl_blob_gl_scanout(g, res, &ss, &fb)) {
+                virgl_blob_shadow_unmap(sh);
+                sh->active = false;
+                virtio_gpu_update_scanout(g, ss.scanout_id, &res->base, &fb, &ss.r);
+                return;
+            }
+            if (virgl_renderer_resource_map(ss.resource_id, &map, &map_size) ||
+                fb.offset + len > map_size) {
+                if (map) {
+                    virgl_renderer_resource_unmap(ss.resource_id);
+                }
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "%s: cannot read host blob %d for display\n",
+                              __func__, ss.resource_id);
+                cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
+                return;
+            }
+        }
+        if (!sh->buf) {
+            info_report("virtio-gpu: blob scanouts shown through a host copy "
+                        "(%s)", res->base.iov_cnt ? "guest memory" : "host mapping");
+        }
+        sh->resource_id = ss.resource_id;
+        sh->offset = fb.offset;
+        sh->map = map;
+        if (!sh->buf || sh->len != len || !so->ds ||
+            surface_data(so->ds) != (void *)sh->buf ||
+            surface_width(so->ds) != ss.r.width ||
+            surface_height(so->ds) != ss.r.height ||
+            surface_stride(so->ds) != fb.stride ||
+            surface_format(so->ds) != fb.format) {
+            old_buf = sh->buf;
+            sh->buf = g_malloc0(len);
+            sh->len = len;
+            virgl_blob_shadow_copy(g, sh);
+            img = pixman_image_create_bits(fb.format, ss.r.width, ss.r.height,
+                                           (uint32_t *)sh->buf, fb.stride);
+            so->ds = qemu_create_displaysurface_pixman(img);
+            pixman_image_unref(img);
+            qemu_console_set_surface(so->con, so->ds);
+            g_free(old_buf); /* the old surface was replaced above */
+        } else {
+            virgl_blob_shadow_copy(g, sh);
+            qemu_console_update_full(so->con);
+        }
+        sh->active = true;
+        virgl_blob_gl[ss.scanout_id].active = false;
+        virtio_gpu_update_scanout(g, ss.scanout_id, &res->base, &fb, &ss.r);
+        return;
+    }
+#endif
     if (virtio_gpu_update_dmabuf(g, ss.scanout_id, &res->base, &fb, &ss.r)) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: failed to update dmabuf\n",
                       __func__);
