@@ -38,6 +38,12 @@ rm -f "$BIN/share/keymaps/meson.build"
 for f in bios-256k.bin kvmvapic.bin linuxboot_dma.bin vgabios-virtio.bin vgabios-stdvga.bin efi-virtio.rom efi-e1000e.rom; do
     cp "$QEMU_SRC/pc-bios/$f" "$BIN/share/" 2>/dev/null || true
 done
+# UEFI firmware (OVMF), so a build is self-contained: code, Secure Boot code,
+# the vars template (copy it per VM) and the licences.
+for f in edk2-x86_64-code.fd edk2-x86_64-secure-code.fd edk2-i386-vars.fd; do
+    bzip2 -dc "$QEMU_SRC/pc-bios/$f.bz2" > "$BIN/share/$f"
+done
+cp "$QEMU_SRC/pc-bios/edk2-licenses.txt" "$BIN/share/"
 # Every MinGW DLL the binaries need, found with ldd (system DLLs excluded).
 for exe in "$BIN"/qemu-system-x86_64.exe "$BIN"/*.dll; do
     ldd "$exe" | awk '/ucrt64/ {print $3}'
