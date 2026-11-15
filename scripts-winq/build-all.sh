@@ -3,6 +3,8 @@
 # Runs in MSYS2 UCRT64 (MSYSTEM=UCRT64 bash -lc ...). Debug info is kept so a
 # hang can be inspected with gdb (thread apply all bt).
 #   VIRGL_SRC=/e/Development/winq-emu-virglrenderer OUT=/e/AgentData/winq-build JOBS=6 scripts-winq/build-all.sh
+# QORRAL_FS_DLL=<path to qorral_fs.dll> bundles the shared-folder file server
+# that virtio-fs-host-pci loads (built in the Qorral repository, fs/qorral-fs).
 set -euo pipefail
 QEMU_SRC=$(cd "$(dirname "$0")/.." && pwd)
 VIRGL_SRC=${VIRGL_SRC:?path to the virglrenderer fork}
@@ -49,6 +51,9 @@ cp "$QEMU_SRC/pc-bios/edk2-licenses.txt" "$BIN/share/"
 # mingw-w64-ucrt-x86_64-angleproject package; the ldd pass below then
 # picks up its own dependencies (libstdc++ and friends).
 cp /ucrt64/bin/libEGL.dll /ucrt64/bin/libGLESv2.dll "$BIN/"
+if [[ -n ${QORRAL_FS_DLL:-} ]]; then
+    cp "$QORRAL_FS_DLL" "$BIN/qorral_fs.dll"
+fi
 # Every MinGW DLL the binaries need, found with ldd (system DLLs excluded).
 for exe in "$BIN"/qemu-system-x86_64.exe "$BIN"/*.dll; do
     ldd "$exe" | awk '/ucrt64/ {print $3}'
