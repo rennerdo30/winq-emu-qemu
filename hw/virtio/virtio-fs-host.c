@@ -192,17 +192,53 @@ static void fsh_done(void *opaque, int ret)
     g_free(r);
 }
 
+/*
+ * FUSE requests that only touch metadata the host answers in microseconds.
+ * They are answered right away in the notifying thread: a thread-pool hop
+ * plus a main-loop wakeup costs far more than the request itself (about
+ * 185 us per request on Windows hosts). Opens, reads, writes, creates and
+ * directory listings can take milliseconds and stay on worker threads.
+ */
+static bool fsh_is_quick(const VirtQueueElement *elem)
+{
+    uint32_t opcode;
+
+    if (elem->out_num < 1 || elem->out_sg[0].iov_len < 8) {
+        return false;
+    }
+    memcpy(&opcode, (uint8_t *)elem->out_sg[0].iov_base + 4, sizeof(opcode));
+    switch (le32_to_cpu(opcode)) {
+    case 1:     /* LOOKUP */
+    case 2:     /* FORGET */
+    case 3:     /* GETATTR */
+    case 5:     /* READLINK */
+    case 17:    /* STATFS */
+    case 18:    /* RELEASE */
+    case 22:    /* GETXATTR */
+    case 23:    /* LISTXATTR */
+    case 25:    /* FLUSH */
+    case 29:    /* RELEASEDIR */
+    case 34:    /* ACCESS */
+    case 36:    /* INTERRUPT */
+    case 42:    /* BATCH_FORGET */
+    case 52:    /* STATX */
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void fsh_handle_output(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtIOFSHost *fs = VIRTIO_FS_HOST(vdev);
     VirtIOFSHostReq *r;
+    bool notify = false;
 
     if (!fs->server) {
         return;
     }
-    if (fs->inline_requests) {
-        bool any = false;
-        while ((r = virtqueue_pop(vq, sizeof(VirtIOFSHostReq)))) {
+    while ((r = virtqueue_pop(vq, sizeof(VirtIOFSHostReq)))) {
+        if (fs->inline_requests || (fs->inline_metadata && fsh_is_quick(&r->elem))) {
             size_t len = fs->lib.handle(fs->server,
                                         (const QfsIovec *)r->elem.out_sg,
                                         r->elem.out_num,
@@ -210,14 +246,9 @@ static void fsh_handle_output(VirtIODevice *vdev, VirtQueue *vq)
                                         r->elem.in_num);
             virtqueue_push(vq, &r->elem, len);
             g_free(r);
-            any = true;
+            notify = true;
+            continue;
         }
-        if (any) {
-            virtio_notify(vdev, vq);
-        }
-        return;
-    }
-    while ((r = virtqueue_pop(vq, sizeof(VirtIOFSHostReq)))) {
         r->fs = fs;
         r->vq = vq;
         r->generation = fs->generation;
@@ -227,6 +258,9 @@ static void fsh_handle_output(VirtIODevice *vdev, VirtQueue *vq)
         qemu_mutex_unlock(&fs->lock);
         fs->pending++;
         thread_pool_submit_aio(fsh_worker, r, fsh_done, r);
+    }
+    if (notify) {
+        virtio_notify(vdev, vq);
     }
 }
 
@@ -368,6 +402,7 @@ static const Property fsh_properties[] = {
                        num_request_queues, 1),
     DEFINE_PROP_UINT16("queue-size", VirtIOFSHost, queue_size, 1024),
     DEFINE_PROP_BOOL("inline", VirtIOFSHost, inline_requests, false),
+    DEFINE_PROP_BOOL("inline-metadata", VirtIOFSHost, inline_metadata, true),
 };
 
 static void fsh_class_init(ObjectClass *klass, const void *data)
