@@ -39,7 +39,8 @@ struct VirtIOFSHost {
     char *library;      /* optional path of the file-server library */
     uint16_t num_request_queues;
     uint16_t queue_size;
-    bool inline_requests; /* experiment: answer in the notifying thread */
+    bool inline_requests; /* experiment: answer everything in the notifying thread */
+    bool inline_metadata; /* answer quick metadata requests in the notifying thread */
 
     VirtIOFSHostLib lib;
     void *server;
