@@ -709,6 +709,20 @@ bool egl_init(const char *rendernode, DisplayGLMode mode, Error **errp)
         return false;
     }
 
+    /*
+     * libepoxy loads the EGL library lazily; without one, the first EGL
+     * call jumps through a null pointer. Report it instead of crashing.
+     */
+    if (!epoxy_has_egl()) {
+        error_setg(errp, "egl: no EGL library found");
+#ifdef WIN32
+        error_append_hint(errp, "Put an EGL implementation (for example "
+                          "ANGLE's libEGL.dll and libGLESv2.dll) next to "
+                          "the QEMU executable.\n");
+#endif
+        return false;
+    }
+
 #ifdef WIN32
     if (qemu_egl_init_dpy_win32(EGL_DEFAULT_DISPLAY, mode) < 0) {
         error_setg(errp, "egl: init failed");

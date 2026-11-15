@@ -21,7 +21,7 @@ echo "== qemu"
 mkdir -p "$OUT/qemu"
 cd "$OUT/qemu"
 [[ -f build.ninja ]] || "$QEMU_SRC/configure" --target-list=x86_64-softmmu --prefix="$PREFIX" \
-    --enable-whpx --enable-opengl --enable-virglrenderer --enable-sdl --enable-slirp \
+    --enable-whpx --enable-opengl --enable-virglrenderer --enable-sdl --enable-slirp --enable-png \
     --disable-docs --disable-plugins --enable-debug-info --disable-werror
 ninja -j "$JOBS" qemu-system-x86_64.exe qemu-img.exe
 
@@ -44,6 +44,11 @@ for f in edk2-x86_64-code.fd edk2-x86_64-secure-code.fd edk2-i386-vars.fd; do
     bzip2 -dc "$QEMU_SRC/pc-bios/$f.bz2" > "$BIN/share/$f"
 done
 cp "$QEMU_SRC/pc-bios/edk2-licenses.txt" "$BIN/share/"
+# EGL for the windowless GL displays (egl-headless, dbus gl=on): libepoxy
+# loads it at run time, so ldd cannot see it. ANGLE comes from the
+# mingw-w64-ucrt-x86_64-angleproject package; the ldd pass below then
+# picks up its own dependencies (libstdc++ and friends).
+cp /ucrt64/bin/libEGL.dll /ucrt64/bin/libGLESv2.dll "$BIN/"
 # Every MinGW DLL the binaries need, found with ldd (system DLLs excluded).
 for exe in "$BIN"/qemu-system-x86_64.exe "$BIN"/*.dll; do
     ldd "$exe" | awk '/ucrt64/ {print $3}'
