@@ -193,38 +193,52 @@ static void fsh_done(void *opaque, int ret)
 }
 
 /*
- * FUSE requests that only touch metadata the host answers in microseconds.
- * They are answered right away in the notifying thread: a thread-pool hop
- * plus a main-loop wakeup costs far more than the request itself (about
- * 185 us per request on Windows hosts). Opens, reads, writes, creates and
- * directory listings can take milliseconds and stay on worker threads.
+ * Requests answered right away in the notifying thread. The thread-pool hop
+ * plus the main-loop wakeup costs about 185 us per request on Windows hosts,
+ * more than most requests take on the host (30-160 us for lookups, opens,
+ * creates, small reads and writes, attribute changes). Only requests that
+ * can take long stay on worker threads: syncs, fallocate, copy ranges, and
+ * reads or writes of more than 64 KiB.
  */
-static bool fsh_is_quick(const VirtQueueElement *elem)
+#define FSH_INLINE_IO_MAX (64 * 1024)
+
+static bool fsh_is_quick(const VirtIOFSHost *fs, const VirtQueueElement *elem)
 {
-    uint32_t opcode;
+    const uint8_t *hdr;
+    uint32_t opcode, size;
 
     if (elem->out_num < 1 || elem->out_sg[0].iov_len < 8) {
         return false;
     }
-    memcpy(&opcode, (uint8_t *)elem->out_sg[0].iov_base + 4, sizeof(opcode));
+    hdr = elem->out_sg[0].iov_base;
+    memcpy(&opcode, hdr + 4, sizeof(opcode));
+    if (!fs->inline_io) {
+        /* Metadata only: lookups, attributes, releases, flushes, statfs. */
+        switch (le32_to_cpu(opcode)) {
+        case 1: case 2: case 3: case 5: case 17: case 18: case 22: case 23:
+        case 25: case 29: case 34: case 36: case 42: case 52:
+            return true;
+        default:
+            return false;
+        }
+    }
     switch (le32_to_cpu(opcode)) {
-    case 1:     /* LOOKUP */
-    case 2:     /* FORGET */
-    case 3:     /* GETATTR */
-    case 5:     /* READLINK */
-    case 17:    /* STATFS */
-    case 18:    /* RELEASE */
-    case 22:    /* GETXATTR */
-    case 23:    /* LISTXATTR */
-    case 25:    /* FLUSH */
-    case 29:    /* RELEASEDIR */
-    case 34:    /* ACCESS */
-    case 36:    /* INTERRUPT */
-    case 42:    /* BATCH_FORGET */
-    case 52:    /* STATX */
-        return true;
-    default:
+    case 15:    /* READ */
+    case 16:    /* WRITE */
+        /* fuse_in_header (40) + fh (8) + offset (8), then the size */
+        if (elem->out_sg[0].iov_len < 60) {
+            return false;
+        }
+        memcpy(&size, hdr + 56, sizeof(size));
+        return le32_to_cpu(size) <= FSH_INLINE_IO_MAX;
+    case 20:    /* FSYNC */
+    case 30:    /* FSYNCDIR */
+    case 43:    /* FALLOCATE */
+    case 47:    /* COPY_FILE_RANGE */
+    case 50:    /* SYNCFS */
         return false;
+    default:
+        return true;
     }
 }
 
@@ -238,7 +252,7 @@ static void fsh_handle_output(VirtIODevice *vdev, VirtQueue *vq)
         return;
     }
     while ((r = virtqueue_pop(vq, sizeof(VirtIOFSHostReq)))) {
-        if (fs->inline_requests || (fs->inline_metadata && fsh_is_quick(&r->elem))) {
+        if (fs->inline_requests || (fs->inline_metadata && fsh_is_quick(fs, &r->elem))) {
             size_t len = fs->lib.handle(fs->server,
                                         (const QfsIovec *)r->elem.out_sg,
                                         r->elem.out_num,
@@ -403,6 +417,7 @@ static const Property fsh_properties[] = {
     DEFINE_PROP_UINT16("queue-size", VirtIOFSHost, queue_size, 1024),
     DEFINE_PROP_BOOL("inline", VirtIOFSHost, inline_requests, false),
     DEFINE_PROP_BOOL("inline-metadata", VirtIOFSHost, inline_metadata, true),
+    DEFINE_PROP_BOOL("inline-io", VirtIOFSHost, inline_io, true),
 };
 
 static void fsh_class_init(ObjectClass *klass, const void *data)

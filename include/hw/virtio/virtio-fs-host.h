@@ -41,6 +41,7 @@ struct VirtIOFSHost {
     uint16_t queue_size;
     bool inline_requests; /* experiment: answer everything in the notifying thread */
     bool inline_metadata; /* answer quick metadata requests in the notifying thread */
+    bool inline_io;       /* also small reads/writes, opens, creates, attribute changes */
 
     VirtIOFSHostLib lib;
     void *server;
