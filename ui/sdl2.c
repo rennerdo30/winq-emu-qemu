@@ -881,6 +881,16 @@ static const DisplayGLCtxOps gl_ctx_ops = {
 };
 #endif
 
+struct sdl2_console *sdl2_console_for(QemuConsole *con)
+{
+    for (int i = 0; i < sdl2_num_outputs; i++) {
+        if (sdl2_console[i].dcl.con == con) {
+            return &sdl2_console[i];
+        }
+    }
+    return NULL;
+}
+
 static void sdl2_display_early_init(DisplayOptions *o)
 {
     assert(o->type == DISPLAY_TYPE_SDL);
@@ -1007,6 +1017,7 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
         sdl2_console[i].kbd = qkbd_state_init(con);
 #ifdef CONFIG_OPENGL
         if (display_opengl) {
+            qemu_console_set_gl_readback(sdl2_gl_readback);
             qemu_console_set_display_gl_ctx(con, &sdl2_console[i].dgc);
             sdl2_gl_console_init(&sdl2_console[i]);
         }

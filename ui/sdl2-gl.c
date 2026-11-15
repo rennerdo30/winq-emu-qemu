@@ -309,6 +309,31 @@ bool sdl2_gl_has_dmabuf(DisplayChangeListener *dcl)
 }
 #endif
 
+/*
+ * screendump of a GL scanout shown in an SDL window: read the texture on
+ * the window's GL context (which shares with the guest's), then restore
+ * whatever context was current.
+ */
+DisplaySurface *sdl2_gl_readback(QemuConsole *con, const ScanoutTexture *t)
+{
+    struct sdl2_console *scon = sdl2_console_for(con);
+    SDL_Window *prev_win;
+    SDL_GLContext prev_ctx;
+    DisplaySurface *ds;
+
+    if (!scon || !scon->opengl || !scon->winctx || !scon->real_window) {
+        return NULL;
+    }
+    prev_win = SDL_GL_GetCurrentWindow();
+    prev_ctx = SDL_GL_GetCurrentContext();
+    if (SDL_GL_MakeCurrent(scon->real_window, scon->winctx) != 0) {
+        return NULL;
+    }
+    ds = egl_texture_readback(t);
+    SDL_GL_MakeCurrent(prev_win, prev_ctx);
+    return ds;
+}
+
 void sdl2_gl_console_init(struct sdl2_console *scon)
 {
     bool hidden = scon->hidden;
