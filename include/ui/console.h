@@ -386,6 +386,15 @@ void qemu_console_set_window_id(QemuConsole *con, int window_id);
 
 void qemu_console_resize(QemuConsole *con, int width, int height);
 DisplaySurface *qemu_console_surface(QemuConsole *con);
+/*
+ * Reads a GL texture scanout back into a new surface (the caller frees it),
+ * for screendump when the console shows a GL texture and has no 2D
+ * surface. The GL display code registers the reader; NULL when there is
+ * none or the console shows something else.
+ */
+typedef DisplaySurface *(*QemuConsoleGLReadback)(const ScanoutTexture *tex);
+void qemu_console_set_gl_readback(QemuConsoleGLReadback fn);
+DisplaySurface *qemu_console_scanout_readback(QemuConsole *con);
 void coroutine_fn qemu_console_co_wait_update(QemuConsole *con);
 
 /* console-gl.c */

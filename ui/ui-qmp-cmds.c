@@ -357,12 +357,19 @@ qmp_screendump(const char *filename, const char *device,
      * an image ref before that.
      */
     surface = qemu_console_surface(con);
-    if (!surface) {
-        error_setg(errp, "no surface");
-        object_unref(con);
-        return;
+    if (surface) {
+        image = pixman_image_ref(surface->image);
+    } else {
+        /* A GL texture scanout (no 2D surface): read it back. */
+        DisplaySurface *gl = qemu_console_scanout_readback(con);
+        if (!gl) {
+            error_setg(errp, "no surface");
+            object_unref(con);
+            return;
+        }
+        image = pixman_image_ref(gl->image);
+        qemu_free_displaysurface(gl);
     }
-    image = pixman_image_ref(surface->image);
     object_unref(con);
 
     fd = qemu_create(filename, O_WRONLY | O_TRUNC | O_BINARY, 0666, errp);
