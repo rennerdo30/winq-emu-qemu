@@ -1381,6 +1381,21 @@ void qemu_console_resize(QemuConsole *s, int width, int height)
     qemu_console_set_surface(s, surface);
 }
 
+static QemuConsoleGLReadback console_gl_readback;
+
+void qemu_console_set_gl_readback(QemuConsoleGLReadback fn)
+{
+    console_gl_readback = fn;
+}
+
+DisplaySurface *qemu_console_scanout_readback(QemuConsole *con)
+{
+    if (con->scanout.kind != SCANOUT_TEXTURE || !console_gl_readback) {
+        return NULL;
+    }
+    return console_gl_readback(&con->scanout.texture);
+}
+
 DisplaySurface *qemu_console_surface(QemuConsole *console)
 {
     switch (console->scanout.kind) {

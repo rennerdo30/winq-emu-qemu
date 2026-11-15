@@ -700,6 +700,85 @@ EGLContext qemu_egl_init_ctx(void)
     return ectx;
 }
 
+/*
+ * screendump of a GL texture scanout: read the guest texture through a
+ * framebuffer on the render-node context. No intermediate blit texture:
+ * its BGRA format is not valid on GLES (ANGLE). Rows are flipped on the
+ * CPU where needed. The previously current context is restored.
+ */
+static DisplaySurface *egl_scanout_readback(const ScanoutTexture *t)
+{
+    egl_fb src = EGL_FB_INIT;
+    EGLContext prev_ctx = eglGetCurrentContext();
+    EGLSurface prev_draw = eglGetCurrentSurface(EGL_DRAW);
+    EGLSurface prev_read = eglGetCurrentSurface(EGL_READ);
+    DisplaySurface *ds = NULL;
+    GLenum status, err;
+
+    if (!qemu_egl_display || !qemu_egl_rn_ctx || !t->backing_id ||
+        !t->backing_width || !t->backing_height) {
+        return NULL;
+    }
+    if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                        qemu_egl_rn_ctx)) {
+        return NULL;
+    }
+    while (glGetError() != GL_NO_ERROR) {
+        /* drop stale errors from other users of this context */
+    }
+    egl_fb_setup_for_tex(&src, t->backing_width, t->backing_height,
+                         t->backing_id, false);
+    status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        warn_report_once("screendump: scanout texture not readable "
+                         "(framebuffer status 0x%x)", status);
+        goto out;
+    }
+    ds = qemu_create_displaysurface(t->backing_width, t->backing_height);
+    egl_fb_read(ds, &src);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        /* No BGRA reads on this GLES driver: read RGBA, swap R and B. */
+        uint8_t *px = surface_data(ds);
+        size_t n = (size_t)surface_stride(ds) * surface_height(ds);
+        glReadPixels(0, 0, surface_width(ds), surface_height(ds),
+                     GL_RGBA, GL_UNSIGNED_BYTE, px);
+        err = glGetError();
+        for (size_t i = 0; err == GL_NO_ERROR && i + 3 < n; i += 4) {
+            uint8_t r = px[i];
+            px[i] = px[i + 2];
+            px[i + 2] = r;
+        }
+    }
+    if (err != GL_NO_ERROR) {
+        warn_report_once("screendump: reading the scanout failed (GL 0x%x)",
+                         err);
+        qemu_free_displaysurface(ds);
+        ds = NULL;
+        goto out;
+    }
+    if (t->backing_y_0_top) {
+        /*
+         * glReadPixels returns rows bottom-up; a y_0_top texture comes out
+         * upside down (the same rule as egl-headless's flipping blit).
+         */
+        int stride = surface_stride(ds);
+        uint8_t *data = surface_data(ds);
+        g_autofree uint8_t *row = g_malloc(stride);
+        for (int y = 0; y < surface_height(ds) / 2; y++) {
+            uint8_t *a = data + y * stride;
+            uint8_t *b = data + (surface_height(ds) - 1 - y) * stride;
+            memcpy(row, a, stride);
+            memcpy(a, b, stride);
+            memcpy(b, row, stride);
+        }
+    }
+out:
+    egl_fb_destroy(&src);
+    eglMakeCurrent(qemu_egl_display, prev_draw, prev_read, prev_ctx);
+    return ds;
+}
+
 bool egl_init(const char *rendernode, DisplayGLMode mode, Error **errp)
 {
     ERRP_GUARD();
@@ -746,6 +825,7 @@ bool egl_init(const char *rendernode, DisplayGLMode mode, Error **errp)
     }
 
     display_opengl = 1;
+    qemu_console_set_gl_readback(egl_scanout_readback);
     return true;
 }
 
