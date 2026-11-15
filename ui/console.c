@@ -1393,7 +1393,7 @@ DisplaySurface *qemu_console_scanout_readback(QemuConsole *con)
     if (con->scanout.kind != SCANOUT_TEXTURE || !console_gl_readback) {
         return NULL;
     }
-    return console_gl_readback(&con->scanout.texture);
+    return console_gl_readback(con, &con->scanout.texture);
 }
 
 DisplaySurface *qemu_console_surface(QemuConsole *console)

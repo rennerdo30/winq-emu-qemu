@@ -392,7 +392,8 @@ DisplaySurface *qemu_console_surface(QemuConsole *con);
  * surface. The GL display code registers the reader; NULL when there is
  * none or the console shows something else.
  */
-typedef DisplaySurface *(*QemuConsoleGLReadback)(const ScanoutTexture *tex);
+typedef DisplaySurface *(*QemuConsoleGLReadback)(QemuConsole *con,
+                                                 const ScanoutTexture *tex);
 void qemu_console_set_gl_readback(QemuConsoleGLReadback fn);
 DisplaySurface *qemu_console_scanout_readback(QemuConsole *con);
 void coroutine_fn qemu_console_co_wait_update(QemuConsole *con);

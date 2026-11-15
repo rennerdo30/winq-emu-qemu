@@ -701,26 +701,18 @@ EGLContext qemu_egl_init_ctx(void)
 }
 
 /*
- * screendump of a GL texture scanout: read the guest texture through a
- * framebuffer on the render-node context. No intermediate blit texture:
- * its BGRA format is not valid on GLES (ANGLE). Rows are flipped on the
- * CPU where needed. The previously current context is restored.
+ * screendump of a GL texture scanout, on the GL context that is current:
+ * read the guest texture through a framebuffer (no intermediate BGRA
+ * texture, which GLES/ANGLE rejects), falling back to RGBA reads with a
+ * channel swap, and flip y_0_top textures. Returns a new surface or NULL.
  */
-static DisplaySurface *egl_scanout_readback(const ScanoutTexture *t)
+DisplaySurface *egl_texture_readback(const ScanoutTexture *t)
 {
     egl_fb src = EGL_FB_INIT;
-    EGLContext prev_ctx = eglGetCurrentContext();
-    EGLSurface prev_draw = eglGetCurrentSurface(EGL_DRAW);
-    EGLSurface prev_read = eglGetCurrentSurface(EGL_READ);
     DisplaySurface *ds = NULL;
     GLenum status, err;
 
-    if (!qemu_egl_display || !qemu_egl_rn_ctx || !t->backing_id ||
-        !t->backing_width || !t->backing_height) {
-        return NULL;
-    }
-    if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                        qemu_egl_rn_ctx)) {
+    if (!t->backing_id || !t->backing_width || !t->backing_height) {
         return NULL;
     }
     while (glGetError() != GL_NO_ERROR) {
@@ -775,6 +767,26 @@ static DisplaySurface *egl_scanout_readback(const ScanoutTexture *t)
     }
 out:
     egl_fb_destroy(&src);
+    return ds;
+}
+
+/* The EGL displays' reader: the render-node context, then restore. */
+static DisplaySurface *egl_scanout_readback(QemuConsole *con,
+                                            const ScanoutTexture *t)
+{
+    EGLContext prev_ctx = eglGetCurrentContext();
+    EGLSurface prev_draw = eglGetCurrentSurface(EGL_DRAW);
+    EGLSurface prev_read = eglGetCurrentSurface(EGL_READ);
+    DisplaySurface *ds;
+
+    if (!qemu_egl_display || !qemu_egl_rn_ctx) {
+        return NULL;
+    }
+    if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                        qemu_egl_rn_ctx)) {
+        return NULL;
+    }
+    ds = egl_texture_readback(t);
     eglMakeCurrent(qemu_egl_display, prev_draw, prev_read, prev_ctx);
     return ds;
 }
