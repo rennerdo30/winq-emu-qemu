@@ -303,6 +303,11 @@
 #
 # @restrict: isolate the guest from the host
 #
+# @host-loopback: whether the guest may connect to the host's loopback
+#     (127.0.0.1) through the host address; ``off`` keeps local host
+#     services unreachable while outside access works.  Default true
+#     (since 11.2)
+#
 # @ipv4: whether to support IPv4, default true for enabled (since 2.6)
 #
 # @ipv6: whether to support IPv6, default true for enabled (since 2.6)
@@ -360,6 +365,7 @@
   'data': {
     '*hostname':  'str',
     '*restrict':  'bool',
+    '*host-loopback': 'bool',
     '*ipv4':      'bool',
     '*ipv6':      'bool',
     '*ip':        'str',

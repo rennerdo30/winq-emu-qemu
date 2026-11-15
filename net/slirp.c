@@ -433,6 +433,7 @@ static SaveVMHandlers savevm_slirp_state = {
 
 static int net_slirp_init(NetClientState *peer, const char *model,
                           const char *name, int restricted,
+                          bool host_loopback,
                           bool ipv4, const char *vnetwork, const char *vhost,
                           bool ipv6, const char *vprefix6, int vprefix6_len,
                           const char *vhost6,
@@ -474,6 +475,13 @@ static int net_slirp_init(NetClientState *peer, const char *model,
         error_setg(errp, "IPv6 disabled but prefix/host6/dns6 provided");
         return -1;
     }
+
+#if !SLIRP_CHECK_VERSION(4, 5, 0)
+    if (!host_loopback) {
+        error_setg(errp, "host-loopback=off needs libslirp 4.5 or newer");
+        return -1;
+    }
+#endif
 
     if (!ipv4 && !ipv6) {
         /* It doesn't make sense to disable both */
@@ -648,6 +656,9 @@ static int net_slirp_init(NetClientState *peer, const char *model,
          SLIRP_CHECK_VERSION(4, 9, 0) ? 6 :
          SLIRP_CHECK_VERSION(4, 7, 0) ? 4 : 1;
     cfg.restricted = restricted;
+#if SLIRP_CHECK_VERSION(4, 5, 0)
+    cfg.disable_host_loopback = !host_loopback;
+#endif
     cfg.in_enabled = ipv4;
     cfg.vnetwork = net;
     cfg.vnetmask = mask;
@@ -1333,6 +1344,7 @@ int net_init_slirp(const Netdev *netdev, const char *name,
     net_init_slirp_configs_guest(user->guestfwd);
 
     ret = net_slirp_init(peer, "user", name, user->q_restrict,
+                         !user->has_host_loopback || user->host_loopback,
                          ipv4, vnet, user->host,
                          ipv6, user->ipv6_prefix, user->ipv6_prefixlen,
                          user->ipv6_host, user->hostname, user->tftp,
