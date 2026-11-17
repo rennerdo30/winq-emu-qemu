@@ -334,6 +334,27 @@ DisplaySurface *sdl2_gl_readback(QemuConsole *con, const ScanoutTexture *t)
     return ds;
 }
 
+bool sdl2_gl_read_pixel(QemuConsole *con, const ScanoutTexture *t,
+                        int x, int y, uint8_t rgba[4])
+{
+    struct sdl2_console *scon = sdl2_console_for(con);
+    SDL_Window *prev_win;
+    SDL_GLContext prev_ctx;
+    bool ok;
+
+    if (!scon || !scon->opengl || !scon->winctx || !scon->real_window) {
+        return false;
+    }
+    prev_win = SDL_GL_GetCurrentWindow();
+    prev_ctx = SDL_GL_GetCurrentContext();
+    if (SDL_GL_MakeCurrent(scon->real_window, scon->winctx) != 0) {
+        return false;
+    }
+    ok = egl_texture_read_pixel(t, x, y, rgba);
+    SDL_GL_MakeCurrent(prev_win, prev_ctx);
+    return ok;
+}
+
 void sdl2_gl_console_init(struct sdl2_console *scon)
 {
     bool hidden = scon->hidden;

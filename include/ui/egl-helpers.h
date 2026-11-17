@@ -82,6 +82,8 @@ bool qemu_egl_has_dmabuf(void);
 
 bool egl_init(const char *rendernode, DisplayGLMode mode, Error **errp);
 DisplaySurface *egl_texture_readback(const ScanoutTexture *t);
+bool egl_texture_read_pixel(const ScanoutTexture *t, int x, int y,
+                            uint8_t rgba[4]);
 void egl_cleanup(void);
 
 const char *qemu_egl_get_error_string(void);

@@ -192,6 +192,60 @@
   'if': 'CONFIG_PIXMAN' }
 
 ##
+# @x-qorral-latency-probe:
+#     Time input to display: press and release @key, then watch the
+#     console's display updates until the brightness of the pixel at
+#     (@x, @y) crosses the middle (dark to bright or bright to dark).
+#     The result arrives as a `QORRAL_LATENCY` event.
+#
+# @key: the key to press (default: spc)
+#
+# @x: probe column (default: the centre)
+#
+# @y: probe row (default: the centre)
+#
+# @head: console index (default: 0)
+#
+# @timeout-ms: give up after this many milliseconds (default: 2000)
+#
+# Features:
+#
+# @unstable: Qorral extension for latency measurements.
+#
+# Since: 11.2
+##
+{ 'command': 'x-qorral-latency-probe',
+  'data': { '*key': 'QKeyCode', '*x': 'int', '*y': 'int', '*head': 'int',
+            '*timeout-ms': 'int' },
+  'features': [ 'unstable' ] }
+
+##
+# @QORRAL_LATENCY:
+#     Result of `x-qorral-latency-probe`.
+#
+# @elapsed-us: microseconds from the key press to the display update
+#     that changed the probe pixel (0 when timed out)
+#
+# @updates: display updates seen while waiting
+#
+# @timed-out: true when the pixel did not change in time
+#
+# @before: probe pixel brightness (0-255) when the probe started
+#
+# @after: probe pixel brightness at the last update read
+#
+# Features:
+#
+# @unstable: Qorral extension for latency measurements.
+#
+# Since: 11.2
+##
+{ 'event': 'QORRAL_LATENCY',
+  'data': { 'elapsed-us': 'int', 'updates': 'int', 'timed-out': 'bool',
+            'before': 'int', 'after': 'int' },
+  'features': [ 'unstable' ] }
+
+##
 # Spice
 # =====
 ##

@@ -396,6 +396,20 @@ typedef DisplaySurface *(*QemuConsoleGLReadback)(QemuConsole *con,
                                                  const ScanoutTexture *tex);
 void qemu_console_set_gl_readback(QemuConsoleGLReadback fn);
 DisplaySurface *qemu_console_scanout_readback(QemuConsole *con);
+/*
+ * One pixel of a GL texture scanout as RGBA (x or y < 0: the centre), read
+ * on the display's GL context. For latency probes, where a full readback per
+ * display update would itself delay the next update.
+ */
+typedef bool (*QemuConsoleGLPixel)(QemuConsole *con, const ScanoutTexture *t,
+                                   int x, int y, uint8_t rgba[4]);
+void qemu_console_set_gl_pixel(QemuConsoleGLPixel fn);
+bool qemu_console_scanout_read_pixel(QemuConsole *con, int x, int y,
+                                     uint8_t rgba[4]);
+
+/* Called after every display update of a console (the latency probe). */
+typedef void (*QemuConsoleUpdateHook)(QemuConsole *con);
+void qemu_console_set_update_hook(QemuConsoleUpdateHook fn);
 void coroutine_fn qemu_console_co_wait_update(QemuConsole *con);
 
 /* console-gl.c */

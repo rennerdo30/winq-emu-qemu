@@ -770,6 +770,64 @@ out:
     return ds;
 }
 
+/*
+ * One pixel of a GL texture scanout, on the GL context that is current
+ * (x or y < 0: the centre). Screen row y is GL row y for y_0_top textures
+ * and height - 1 - y otherwise, as in egl_texture_readback.
+ */
+bool egl_texture_read_pixel(const ScanoutTexture *t, int x, int y,
+                            uint8_t rgba[4])
+{
+    egl_fb src = EGL_FB_INIT;
+    bool ok = false;
+
+    if (!t->backing_id || !t->backing_width || !t->backing_height) {
+        return false;
+    }
+    if (x < 0) {
+        x = t->backing_width / 2;
+    }
+    if (y < 0) {
+        y = t->backing_height / 2;
+    }
+    if (x >= (int)t->backing_width || y >= (int)t->backing_height) {
+        return false;
+    }
+    while (glGetError() != GL_NO_ERROR) {
+        /* drop stale errors from other users of this context */
+    }
+    egl_fb_setup_for_tex(&src, t->backing_width, t->backing_height,
+                         t->backing_id, false);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        int row = t->backing_y_0_top ? y : (int)t->backing_height - 1 - y;
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, src.framebuffer);
+        glReadPixels(x, row, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        ok = glGetError() == GL_NO_ERROR;
+    }
+    egl_fb_destroy(&src);
+    return ok;
+}
+
+static bool egl_scanout_read_pixel(QemuConsole *con, const ScanoutTexture *t,
+                                   int x, int y, uint8_t rgba[4])
+{
+    EGLContext prev_ctx = eglGetCurrentContext();
+    EGLSurface prev_draw = eglGetCurrentSurface(EGL_DRAW);
+    EGLSurface prev_read = eglGetCurrentSurface(EGL_READ);
+    bool ok;
+
+    if (!qemu_egl_display || !qemu_egl_rn_ctx) {
+        return false;
+    }
+    if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                        qemu_egl_rn_ctx)) {
+        return false;
+    }
+    ok = egl_texture_read_pixel(t, x, y, rgba);
+    eglMakeCurrent(qemu_egl_display, prev_draw, prev_read, prev_ctx);
+    return ok;
+}
+
 /* The EGL displays' reader: the render-node context, then restore. */
 static DisplaySurface *egl_scanout_readback(QemuConsole *con,
                                             const ScanoutTexture *t)
@@ -838,6 +896,7 @@ bool egl_init(const char *rendernode, DisplayGLMode mode, Error **errp)
 
     display_opengl = 1;
     qemu_console_set_gl_readback(egl_scanout_readback);
+    qemu_console_set_gl_pixel(egl_scanout_read_pixel);
     return true;
 }
 
