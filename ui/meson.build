@@ -57,6 +57,7 @@ system_ss.add(files(
   'input-barrier.c',
   'input.c',
   'ui-qmp-cmds.c',
+  'qorral-latency.c',
   'util.c',
 ))
 if have_hmp

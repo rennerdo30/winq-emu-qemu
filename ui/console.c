@@ -730,6 +730,13 @@ int qemu_console_set_ui_info(QemuConsole *con, QemuUIInfo *info, bool delay)
     return 0;
 }
 
+static QemuConsoleUpdateHook console_update_hook;
+
+void qemu_console_set_update_hook(QemuConsoleUpdateHook fn)
+{
+    console_update_hook = fn;
+}
+
 void qemu_console_update(QemuConsole *con, int x, int y, int w, int h)
 {
     DisplayState *s = con->ds;
@@ -755,6 +762,9 @@ void qemu_console_update(QemuConsole *con, int x, int y, int w, int h)
         if (dcl->ops->dpy_gfx_update) {
             dcl->ops->dpy_gfx_update(dcl, x, y, w, h);
         }
+    }
+    if (console_update_hook) {
+        console_update_hook(con);
     }
 }
 
@@ -1078,6 +1088,9 @@ void qemu_console_gl_update(QemuConsole *con,
         }
     }
     qemu_console_hw_gl_block(con, false);
+    if (console_update_hook) {
+        console_update_hook(con);
+    }
 }
 
 /***********************************************************/
@@ -1394,6 +1407,22 @@ DisplaySurface *qemu_console_scanout_readback(QemuConsole *con)
         return NULL;
     }
     return console_gl_readback(con, &con->scanout.texture);
+}
+
+static QemuConsoleGLPixel console_gl_pixel;
+
+void qemu_console_set_gl_pixel(QemuConsoleGLPixel fn)
+{
+    console_gl_pixel = fn;
+}
+
+bool qemu_console_scanout_read_pixel(QemuConsole *con, int x, int y,
+                                     uint8_t rgba[4])
+{
+    if (con->scanout.kind != SCANOUT_TEXTURE || !console_gl_pixel) {
+        return false;
+    }
+    return console_gl_pixel(con, &con->scanout.texture, x, y, rgba);
 }
 
 DisplaySurface *qemu_console_surface(QemuConsole *console)

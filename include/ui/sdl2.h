@@ -83,6 +83,8 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl);
 void sdl2_gl_redraw(struct sdl2_console *scon);
 struct sdl2_console *sdl2_console_for(QemuConsole *con);
 DisplaySurface *sdl2_gl_readback(QemuConsole *con, const ScanoutTexture *t);
+bool sdl2_gl_read_pixel(QemuConsole *con, const ScanoutTexture *t,
+                        int x, int y, uint8_t rgba[4]);
 
 QEMUGLContext sdl2_gl_create_context(DisplayGLCtx *dgc,
                                      QEMUGLParams *params);

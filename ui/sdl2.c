@@ -1018,6 +1018,7 @@ static void sdl2_display_init(DisplayState *ds, DisplayOptions *o)
 #ifdef CONFIG_OPENGL
         if (display_opengl) {
             qemu_console_set_gl_readback(sdl2_gl_readback);
+            qemu_console_set_gl_pixel(sdl2_gl_read_pixel);
             qemu_console_set_display_gl_ctx(con, &sdl2_console[i].dgc);
             sdl2_gl_console_init(&sdl2_console[i]);
         }
