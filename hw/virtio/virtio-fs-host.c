@@ -242,15 +242,11 @@ static bool fsh_is_quick(const VirtIOFSHost *fs, const VirtQueueElement *elem)
     }
 }
 
-static void fsh_handle_output(VirtIODevice *vdev, VirtQueue *vq)
+/* Answers or dispatches every request available on the queue now. */
+static void fsh_drain(VirtIOFSHost *fs, VirtQueue *vq, bool *notify)
 {
-    VirtIOFSHost *fs = VIRTIO_FS_HOST(vdev);
     VirtIOFSHostReq *r;
-    bool notify = false;
 
-    if (!fs->server) {
-        return;
-    }
     while ((r = virtqueue_pop(vq, sizeof(VirtIOFSHostReq)))) {
         if (fs->inline_requests || (fs->inline_metadata && fsh_is_quick(fs, &r->elem))) {
             size_t len = fs->lib.handle(fs->server,
@@ -260,7 +256,7 @@ static void fsh_handle_output(VirtIODevice *vdev, VirtQueue *vq)
                                         r->elem.in_num);
             virtqueue_push(vq, &r->elem, len);
             g_free(r);
-            notify = true;
+            *notify = true;
             continue;
         }
         r->fs = fs;
@@ -273,6 +269,30 @@ static void fsh_handle_output(VirtIODevice *vdev, VirtQueue *vq)
         fs->pending++;
         thread_pool_submit_aio(fsh_worker, r, fsh_done, r);
     }
+}
+
+static void fsh_handle_output(VirtIODevice *vdev, VirtQueue *vq)
+{
+    VirtIOFSHost *fs = VIRTIO_FS_HOST(vdev);
+    bool notify = false;
+
+    if (!fs->server) {
+        return;
+    }
+    /*
+     * The usual virtio loop: no guest kicks while the queue is drained,
+     * then notifications back on (with a full barrier) and one more look.
+     * Draining until empty alone can miss a request: the "notify me" index
+     * written by virtqueue_pop may become visible to the guest only after
+     * the device's last emptiness check, so both sides assume the other
+     * one acts, and the request waits for the next unrelated kick (seen as
+     * 5 s stalls: the guest's periodic writeback).
+     */
+    do {
+        virtio_queue_set_notification(vq, 0);
+        fsh_drain(fs, vq, &notify);
+        virtio_queue_set_notification(vq, 1);
+    } while (!virtio_queue_empty(vq));
     if (notify) {
         virtio_notify(vdev, vq);
     }
