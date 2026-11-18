@@ -652,6 +652,13 @@
         @height: display height, in pixels.
         @stride: bytes per row.
         @pixman_format: image format (ex: ``PIXMAN_X8R8G8B8``).
+        @image: empty, or the dedicated image the memory belongs to, as the
+          host driver created it: flags, image type, format, width, height,
+          depth, mip levels, array layers, samples, tiling, usage, sharing
+          mode, external handle types (Vk* values). The driver may compress
+          image memory: recreate this image (with OPAQUE_WIN32 external
+          memory) and import the memory as its dedicated allocation to read
+          it; a plain buffer reads compressed bytes.
     -->
     <method name="ScanoutBlob">
       <arg type="u" name="resource_id" direction="in"/>
@@ -670,6 +677,9 @@
       <arg type="u" name="height" direction="in"/>
       <arg type="u" name="stride" direction="in"/>
       <arg type="u" name="pixman_format" direction="in"/>
+      <arg type="au" name="image" direction="in">
+        <annotation name="org.gtk.GDBus.C.ForceGVariant" value="true"/>
+      </arg>
     </method>
 
     <!--

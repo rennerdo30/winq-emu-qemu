@@ -198,6 +198,15 @@ typedef struct QemuWin32Blob {
     uint32_t height;
     uint32_t stride;
     uint32_t format;        /* pixman format */
+    /*
+     * The dedicated image the memory belongs to, as the host driver created
+     * it, or n_image = 0 when unknown: flags, type, format, width, height,
+     * depth, mip levels, array layers, samples, tiling, usage, sharing mode,
+     * external handle types (Vk* values). Image memory may be compressed;
+     * only an identical image reads it correctly.
+     */
+    uint32_t image[13];
+    uint32_t n_image;
 } QemuWin32Blob;
 #endif
 

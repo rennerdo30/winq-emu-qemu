@@ -252,6 +252,19 @@ static const QemuWin32Blob *virgl_w32blob_get(uint32_t resource_id,
             b->flags = ex.flags;
             memcpy(b->device_uuid, ex.device_uuid, sizeof(b->device_uuid));
             memcpy(b->driver_uuid, ex.driver_uuid, sizeof(b->driver_uuid));
+            if (ex.flags & VIRGL_RENDERER_WIN32_HANDLE_IMAGE) {
+                const uint32_t im[] = {
+                    ex.image_flags, ex.image_type, ex.image_format,
+                    ex.image_width, ex.image_height, ex.image_depth,
+                    ex.image_mip_levels, ex.image_array_layers,
+                    ex.image_samples, ex.image_tiling, ex.image_usage,
+                    ex.image_sharing_mode, ex.image_handle_types,
+                };
+
+                QEMU_BUILD_BUG_ON(sizeof(im) != sizeof(b->image));
+                memcpy(b->image, im, sizeof(im));
+                b->n_image = ARRAY_SIZE(im);
+            }
         }
         g_hash_table_insert(virgl_w32blobs, GUINT_TO_POINTER(resource_id), b);
     }
