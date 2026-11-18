@@ -25,6 +25,9 @@ struct QemuConsole {
     const GraphicHwOps *hw_ops;
     void *hw;
     CoQueue dump_queue;
+#ifdef WIN32
+    const QemuWin32Blob *win32_blob;   /* current blob scanout, or NULL */
+#endif
 
     QTAILQ_ENTRY(QemuConsole) next;
 };

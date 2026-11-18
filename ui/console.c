@@ -313,6 +313,13 @@ static void displaychangelistener_display_console(DisplayChangeListener *dcl,
                                          con->scanout.texture.height,
                                          con->scanout.texture.d3d_tex2d);
     }
+#ifdef WIN32
+    if (con->win32_blob && dcl->ops->dpy_win32_blob_flip) {
+        dcl->ops->dpy_win32_blob_flip(dcl, con->win32_blob, 0, 0,
+                                      con->win32_blob->width,
+                                      con->win32_blob->height);
+    }
+#endif
 }
 
 void qemu_text_console_put_keysym(QemuTextConsole *s, int keysym)
@@ -1071,6 +1078,46 @@ void qemu_console_gl_release_dmabuf(QemuConsole *con,
         qemu_console_gl_scanout_disable(con);
     }
 }
+
+#ifdef WIN32
+void qemu_console_win32_blob_flip(QemuConsole *con, const QemuWin32Blob *blob,
+                                  int x, int y, int w, int h)
+{
+    DisplayState *s = con->ds;
+    DisplayChangeListener *dcl;
+
+    if (!blob && !con->win32_blob) {
+        return;
+    }
+    con->win32_blob = blob;
+    QLIST_FOREACH(dcl, &s->listeners, next) {
+        if (con == dcl->con && dcl->ops->dpy_win32_blob_flip) {
+            dcl->ops->dpy_win32_blob_flip(dcl, blob, x, y, w, h);
+        }
+    }
+}
+
+void qemu_console_win32_blob_forget(QemuConsole *con, uint32_t resource_id)
+{
+    DisplayState *s = con->ds;
+    DisplayChangeListener *dcl;
+
+    if (con->win32_blob && con->win32_blob->resource_id == resource_id) {
+        qemu_console_win32_blob_flip(con, NULL, 0, 0, 0, 0);
+    }
+    QLIST_FOREACH(dcl, &s->listeners, next) {
+        if (con == dcl->con && dcl->ops->dpy_win32_blob_forget) {
+            dcl->ops->dpy_win32_blob_forget(dcl, resource_id);
+        }
+    }
+}
+
+const QemuWin32Blob *qemu_console_get_win32_blob(QemuConsole *con)
+{
+    return con ? con->win32_blob : NULL;
+}
+
+#endif
 
 void qemu_console_gl_update(QemuConsole *con,
                             uint32_t x, uint32_t y, uint32_t w, uint32_t h)
