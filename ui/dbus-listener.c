@@ -80,6 +80,11 @@ struct _DBusDisplayListener {
 #ifdef WIN32
     QemuDBusDisplay1ListenerWin32Map *map_proxy;
     QemuDBusDisplay1ListenerWin32D3d11 *d3d11_proxy;
+    /* zero-copy blob scanouts (Qorral): proxy, resource id -> generation + 1 sent */
+    QemuDBusDisplay1ListenerWin32VulkanMemory *vk_proxy;
+    GHashTable *vk_sent;
+    /* the client shows blobs: no pixels go out on the other paths */
+    bool vk_active;
     HANDLE peer_process;
     ID3D11Texture2D *d3d_texture;
 #ifdef CONFIG_OPENGL
@@ -119,6 +124,15 @@ static void ddl_discard_cursor_messages(DBusDisplayListener *ddl)
 }
 
 #ifdef CONFIG_OPENGL
+static bool ddl_shows_blobs(DBusDisplayListener *ddl)
+{
+#ifdef WIN32
+    return ddl->vk_active;
+#else
+    return false;
+#endif
+}
+
 static void dbus_scanout_disable(DisplayChangeListener *dcl)
 {
     DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
@@ -259,6 +273,9 @@ static void dbus_call_update_gl(DisplayChangeListener *dcl,
 #endif
 
     trace_dbus_update_gl(x, y, w, h);
+    if (ddl_shows_blobs(container_of(dcl, DBusDisplayListener, dcl))) {
+        return;
+    }
 
     glFlush();
 #ifdef CONFIG_GBM
@@ -859,6 +876,9 @@ static void dbus_gfx_update(DisplayChangeListener *dcl,
     assert(ddl->ds);
 
     trace_dbus_update(x, y, w, h);
+    if (ddl_shows_blobs(ddl)) {
+        return;
+    }
 
     if (dbus_scanout_map(ddl)) {
 #ifdef WIN32
@@ -896,7 +916,7 @@ static void dbus_gl_gfx_switch(DisplayChangeListener *dcl,
 
     ddl->ds = new_surface;
     ddl->ds_share = SHARE_KIND_NONE;
-    if (ddl->ds) {
+    if (ddl->ds && !ddl_shows_blobs(ddl)) {
         int width = surface_width(ddl->ds);
         int height = surface_height(ddl->ds);
 
@@ -955,6 +975,76 @@ static void dbus_cursor_define(DisplayChangeListener *dcl,
 }
 
 #ifdef CONFIG_OPENGL
+#ifdef WIN32
+static void dbus_win32_blob_flip(DisplayChangeListener *dcl,
+                                 const QemuWin32Blob *blob,
+                                 int x, int y, int w, int h)
+{
+    DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
+    QemuDBusDisplay1ListenerWin32VulkanMemory *p = ddl->vk_proxy;
+
+    if (!p) {
+        return;
+    }
+    if (!blob) {
+        if (ddl->vk_active) {
+            ddl->vk_active = false;
+            qemu_dbus_display1_listener_win32_vulkan_memory_call_flip_blob(
+                p, 0, 0, 0, 0, 0, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+            /* Back on the pixel paths: send the current surface again. */
+            ddl->ds_share = SHARE_KIND_NONE;
+            ddl->ds_scanout_pending = true;
+            if (ddl->ds && dcl->ops->dpy_gfx_switch) {
+                dcl->ops->dpy_gfx_switch(dcl, ddl->ds);
+            }
+        }
+        return;
+    }
+    if (GPOINTER_TO_UINT(g_hash_table_lookup(ddl->vk_sent,
+                                             GUINT_TO_POINTER(blob->resource_id))) !=
+        blob->generation + 1) {
+        HANDLE target;
+
+        if (!DuplicateHandle(GetCurrentProcess(), blob->handle,
+                             ddl->peer_process, &target, 0, FALSE,
+                             DUPLICATE_SAME_ACCESS)) {
+            g_autofree char *msg = g_win32_error_message(GetLastError());
+            g_debug("Failed to DuplicateHandle for a blob: %s", msg);
+            return;
+        }
+        /* No callback: sent without expecting a reply; QEMU never waits. */
+        qemu_dbus_display1_listener_win32_vulkan_memory_call_scanout_blob(
+            p, blob->resource_id, (guint64)(uintptr_t)target,
+            blob->allocation_size, blob->memory_type_index, blob->flags,
+            g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, blob->device_uuid,
+                                      sizeof(blob->device_uuid), 1),
+            g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, blob->driver_uuid,
+                                      sizeof(blob->driver_uuid), 1),
+            blob->offset, blob->width, blob->height, blob->stride, blob->format,
+            G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+        g_hash_table_insert(ddl->vk_sent, GUINT_TO_POINTER(blob->resource_id),
+                            GUINT_TO_POINTER(blob->generation + 1));
+    }
+    ddl->vk_active = true;
+    qemu_dbus_display1_listener_win32_vulkan_memory_call_flip_blob(
+        p, blob->resource_id, x, y, w, h, G_DBUS_CALL_FLAGS_NONE, -1,
+        NULL, NULL, NULL);
+}
+
+static void dbus_win32_blob_forget(DisplayChangeListener *dcl,
+                                   uint32_t resource_id)
+{
+    DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
+
+    if (ddl->vk_proxy &&
+        g_hash_table_remove(ddl->vk_sent, GUINT_TO_POINTER(resource_id))) {
+        qemu_dbus_display1_listener_win32_vulkan_memory_call_forget_blob(
+            ddl->vk_proxy, resource_id, G_DBUS_CALL_FLAGS_NONE, -1,
+            NULL, NULL, NULL);
+    }
+}
+#endif
+
 const DisplayChangeListenerOps dbus_gl_dcl_ops = {
     .dpy_name                = "dbus-gl",
     .dpy_gfx_update          = dbus_gl_gfx_update,
@@ -973,6 +1063,10 @@ const DisplayChangeListenerOps dbus_gl_dcl_ops = {
 #endif
     .dpy_gl_cursor_position  = dbus_gl_cursor_position,
     .dpy_gl_update           = dbus_scanout_update,
+#ifdef WIN32
+    .dpy_win32_blob_flip     = dbus_win32_blob_flip,
+    .dpy_win32_blob_forget   = dbus_win32_blob_forget,
+#endif
 };
 #endif
 
@@ -980,6 +1074,10 @@ const DisplayChangeListenerOps dbus_dcl_ops = {
     .dpy_name                = "dbus",
     .dpy_gfx_update          = dbus_gfx_update,
     .dpy_gfx_switch          = dbus_gfx_switch,
+#ifdef WIN32
+    .dpy_win32_blob_flip     = dbus_win32_blob_flip,
+    .dpy_win32_blob_forget   = dbus_win32_blob_forget,
+#endif
     .dpy_refresh             = dbus_refresh,
     .dpy_mouse_set           = dbus_mouse_set,
     .dpy_cursor_define       = dbus_cursor_define,
@@ -997,6 +1095,8 @@ dbus_display_listener_dispose(GObject *object)
     g_clear_object(&ddl->map_proxy);
 #ifdef WIN32
     g_clear_object(&ddl->d3d11_proxy);
+    g_clear_object(&ddl->vk_proxy);
+    g_clear_pointer(&ddl->vk_sent, g_hash_table_unref);
     g_clear_pointer(&ddl->peer_process, CloseHandle);
 #ifdef CONFIG_OPENGL
     egl_fb_destroy(&ddl->fb);
@@ -1132,6 +1232,28 @@ dbus_display_listener_setup_d3d11(DBusDisplayListener *ddl)
         g_debug("Failed to setup win32 d3d11 proxy: %s", err->message);
         return;
     }
+#endif
+}
+
+static void
+dbus_display_listener_setup_vulkan_memory(DBusDisplayListener *ddl)
+{
+#ifdef WIN32
+    g_autoptr(GError) err = NULL;
+
+    if (!dbus_display_listener_implements(
+            ddl, "org.qemu.Display1.Listener.Win32.VulkanMemory") ||
+        !dbus_display_listener_setup_peer_process(ddl)) {
+        return;
+    }
+    ddl->vk_proxy = qemu_dbus_display1_listener_win32_vulkan_memory_proxy_new_sync(
+        ddl->conn, G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START, NULL,
+        "/org/qemu/Display1/Listener", NULL, &err);
+    if (!ddl->vk_proxy) {
+        g_debug("Failed to setup win32 Vulkan memory proxy: %s", err->message);
+        return;
+    }
+    ddl->vk_sent = g_hash_table_new(NULL, NULL);
 #endif
 }
 
@@ -1304,6 +1426,7 @@ dbus_display_listener_new(const char *bus_name,
     dbus_display_listener_setup_shared_map(ddl);
     trace_dbus_can_share_map(ddl->can_share_map);
     dbus_display_listener_setup_d3d11(ddl);
+    dbus_display_listener_setup_vulkan_memory(ddl);
     dbus_display_listener_setup_scanout_dmabuf_v2(ddl);
 
     con = qemu_console_lookup_by_index(dbus_display_console_get_index(console));

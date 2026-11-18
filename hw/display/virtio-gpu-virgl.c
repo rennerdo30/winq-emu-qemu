@@ -94,6 +94,11 @@ typedef struct VirglBlobShadow {
     size_t len;
     uint32_t offset;
     VkRead *vk; /* borrowed from virgl_vkread_cache */
+    /*
+     * The blob was just flipped to zero-copy listeners on SET_SCANOUT_BLOB:
+     * the guest's RESOURCE_FLUSH of the same frame that follows adds nothing.
+     */
+    bool flipped;
 } VirglBlobShadow;
 
 static VirglBlobShadow virgl_blob_shadow[VIRTIO_GPU_MAX_SCANOUTS];
@@ -206,24 +211,107 @@ static void virgl_blob_shadow_copy(VirtIOGPU *g, VirglBlobShadow *s)
     }
 }
 
+/*
+ * Zero-copy blob scanouts (Qorral): every scanout buffer's memory is exported
+ * once and handed to display listeners that import it into their own Vulkan
+ * device on the same GPU (QemuWin32Blob, dpy_win32_blob_flip). An entry
+ * lives until the guest frees the resource; one without a handle marks a
+ * buffer that cannot be exported (guest memory), so it is not retried.
+ */
+static GHashTable *virgl_w32blobs; /* resource id -> QemuWin32Blob */
+
+static void virgl_w32blob_free(gpointer p)
+{
+    QemuWin32Blob *b = p;
+
+    if (b->handle) {
+        CloseHandle(b->handle);
+    }
+    g_free(b);
+}
+
+static const QemuWin32Blob *virgl_w32blob_get(uint32_t resource_id,
+                                              const struct virtio_gpu_framebuffer *fb,
+                                              uint32_t width, uint32_t height)
+{
+    struct virgl_renderer_win32_export ex;
+    QemuWin32Blob *b;
+
+    if (!virgl_w32blobs) {
+        virgl_w32blobs = g_hash_table_new_full(NULL, NULL, NULL,
+                                               virgl_w32blob_free);
+    }
+    b = g_hash_table_lookup(virgl_w32blobs, GUINT_TO_POINTER(resource_id));
+    if (!b) {
+        b = g_new0(QemuWin32Blob, 1);
+        b->resource_id = resource_id;
+        if (!virgl_renderer_resource_export_win32(resource_id, &ex)) {
+            b->handle = ex.handle;
+            b->allocation_size = ex.allocation_size;
+            b->memory_type_index = ex.memory_type_index;
+            b->flags = ex.flags;
+            memcpy(b->device_uuid, ex.device_uuid, sizeof(b->device_uuid));
+            memcpy(b->driver_uuid, ex.driver_uuid, sizeof(b->driver_uuid));
+        }
+        g_hash_table_insert(virgl_w32blobs, GUINT_TO_POINTER(resource_id), b);
+    }
+    if (!b->handle) {
+        return NULL;
+    }
+    if (b->offset != fb->offset || b->width != width || b->height != height ||
+        b->stride != fb->stride || b->format != fb->format) {
+        b->offset = fb->offset;
+        b->width = width;
+        b->height = height;
+        b->stride = fb->stride;
+        b->format = fb->format;
+        b->generation++;
+    }
+    if (b->offset + (uint64_t)b->stride * b->height > b->allocation_size) {
+        return NULL;
+    }
+    return b;
+}
+
+static const QemuWin32Blob *virgl_w32blob_lookup(uint32_t resource_id)
+{
+    QemuWin32Blob *b = virgl_w32blobs ?
+        g_hash_table_lookup(virgl_w32blobs, GUINT_TO_POINTER(resource_id)) : NULL;
+
+    return b && b->handle ? b : NULL;
+}
+
 /* The scanout shows something else now (or nothing). */
-static void virgl_blob_scanout_off(int idx)
+static void virgl_blob_scanout_off(VirtIOGPU *g, int idx)
 {
     VirglBlobShadow *s = &virgl_blob_shadow[idx];
+    QemuConsole *con = g->parent_obj.scanout[idx].con;
 
     s->vk = NULL; /* the cache keeps the import */
     s->active = false;
+    if (con) {
+        qemu_console_win32_blob_flip(con, NULL, 0, 0, 0, 0);
+    }
 }
 
-/* A resource goes away: drop every copy of it. */
-static void virgl_blob_forget(uint32_t resource_id)
+/* A resource goes away: drop every copy and every export of it. */
+static void virgl_blob_forget(VirtIOGPU *g, uint32_t resource_id)
 {
     int i;
 
     for (i = 0; i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
         if (virgl_blob_shadow[i].resource_id == resource_id) {
-            virgl_blob_scanout_off(i);
+            virgl_blob_scanout_off(g, i);
         }
+    }
+    for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
+        if (g->parent_obj.scanout[i].con) {
+            qemu_console_win32_blob_forget(g->parent_obj.scanout[i].con,
+                                           resource_id);
+        }
+    }
+    if (virgl_w32blobs) {
+        g_hash_table_remove(virgl_w32blobs, GUINT_TO_POINTER(resource_id));
     }
     virgl_vkread_forget(resource_id);
 }
@@ -612,7 +700,7 @@ virtio_gpu_virgl_resource_unref(VirtIOGPU *g,
 #endif
 
 #ifdef _WIN32
-    virgl_blob_forget(res->base.resource_id);
+    virgl_blob_forget(g, res->base.resource_id);
 #endif
     virtio_gpu_disable_scanout_for_resource(g, res->base.resource_id);
 
@@ -736,9 +824,17 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
 #ifdef _WIN32
         if (virgl_blob_shadow[i].active &&
             virgl_blob_shadow[i].resource_id == rf.resource_id) {
+            const QemuWin32Blob *blob = virgl_w32blob_lookup(rf.resource_id);
+
             virgl_blob_shadow_copy(g, &virgl_blob_shadow[i]);
             qemu_console_update(g->parent_obj.scanout[i].con, rf.r.x, rf.r.y,
                            rf.r.width, rf.r.height);
+            if (blob && !virgl_blob_shadow[i].flipped) {
+                qemu_console_win32_blob_flip(g->parent_obj.scanout[i].con, blob,
+                                             rf.r.x, rf.r.y,
+                                             rf.r.width, rf.r.height);
+            }
+            virgl_blob_shadow[i].flipped = false;
             continue;
         }
 #endif
@@ -798,7 +894,7 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
 
     virtio_gpu_release_scanout_dmabuf(g, ss.scanout_id);
 #ifdef _WIN32
-    virgl_blob_scanout_off(ss.scanout_id);
+    virgl_blob_scanout_off(g, ss.scanout_id);
 #endif
 
     qemu_console_resize(g->parent_obj.scanout[ss.scanout_id].con,
@@ -1202,7 +1298,7 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
 
     if (ss.resource_id == 0) {
 #ifdef _WIN32
-        virgl_blob_scanout_off(ss.scanout_id);
+        virgl_blob_scanout_off(g, ss.scanout_id);
 #endif
         virtio_gpu_disable_scanout(g, ss.scanout_id);
         return;
@@ -1290,6 +1386,14 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         }
         sh->active = true;
         virtio_gpu_update_scanout(g, ss.scanout_id, &res->base, &fb, &ss.r);
+        {
+            const QemuWin32Blob *blob = virgl_w32blob_get(ss.resource_id, &fb,
+                                                          ss.r.width, ss.r.height);
+
+            qemu_console_win32_blob_flip(so->con, blob, 0, 0,
+                                         ss.r.width, ss.r.height);
+            sh->flipped = blob != NULL;
+        }
         return;
     }
 #endif

@@ -176,6 +176,31 @@ typedef struct DisplayScanout {
 typedef struct DisplayState DisplayState;
 typedef struct DisplayGLCtx DisplayGLCtx;
 
+#ifdef WIN32
+/*
+ * A scanout in exported host Vulkan memory (Qorral): listeners that
+ * implement dpy_win32_blob_flip import the memory into their own Vulkan
+ * device on the same physical device and show it in place, with no copy.
+ * The producer owns @handle; listeners duplicate it into their clients.
+ * @generation changes whenever the layout fields change.
+ */
+typedef struct QemuWin32Blob {
+    uint32_t resource_id;
+    uint32_t generation;
+    void *handle;           /* NT handle, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT */
+    uint64_t allocation_size;
+    uint32_t memory_type_index;
+    uint32_t flags;         /* 1: dedicated image allocation */
+    uint8_t device_uuid[16];
+    uint8_t driver_uuid[16];
+    uint64_t offset;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint32_t format;        /* pixman format */
+} QemuWin32Blob;
+#endif
+
 typedef struct DisplayChangeListenerOps {
     const char *dpy_name;
 
@@ -239,6 +264,15 @@ typedef struct DisplayChangeListenerOps {
     void (*dpy_gl_update)(DisplayChangeListener *dcl,
                           uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
+#ifdef WIN32
+    /* optional: @blob is shown (NULL: no more blob scanouts); x, y, w, h changed */
+    void (*dpy_win32_blob_flip)(DisplayChangeListener *dcl,
+                                const QemuWin32Blob *blob,
+                                int x, int y, int w, int h);
+    /* optional: the guest freed this blob */
+    void (*dpy_win32_blob_forget)(DisplayChangeListener *dcl,
+                                  uint32_t resource_id);
+#endif
 } DisplayChangeListenerOps;
 
 struct DisplayChangeListener {
@@ -301,6 +335,17 @@ bool qemu_console_check_format(QemuConsole *con,
                                pixman_format_code_t format);
 
 void qemu_console_gl_scanout_disable(QemuConsole *con);
+#ifdef WIN32
+/*
+ * Blob scanouts in exported Vulkan memory. The console keeps a pointer to the
+ * current blob for listeners that attach later: the producer must keep it
+ * valid until it calls qemu_console_win32_blob_forget() or flips to another.
+ */
+void qemu_console_win32_blob_flip(QemuConsole *con, const QemuWin32Blob *blob,
+                                  int x, int y, int w, int h);
+void qemu_console_win32_blob_forget(QemuConsole *con, uint32_t resource_id);
+const QemuWin32Blob *qemu_console_get_win32_blob(QemuConsole *con);
+#endif
 void qemu_console_gl_scanout_texture(QemuConsole *con,
                                      uint32_t backing_id, bool backing_y_0_top,
                                      uint32_t backing_width, uint32_t backing_height,
