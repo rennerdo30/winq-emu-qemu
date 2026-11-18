@@ -1068,6 +1068,20 @@ static int emulate_instruction(CPUState *cpu, const uint8_t *insn_bytes, size_t 
     return 0;
 }
 
+/* Index of the first byte after legacy and REX prefixes. */
+static size_t whpx_insn_skip_prefixes(const uint8_t *b, size_t len)
+{
+    size_t i = 0;
+
+    while (i < len && (b[i] == 0x66 || b[i] == 0x67 || b[i] == 0xf0 ||
+                       b[i] == 0xf2 || b[i] == 0xf3 || b[i] == 0x26 ||
+                       b[i] == 0x2e || b[i] == 0x36 || b[i] == 0x3e ||
+                       b[i] == 0x64 || b[i] == 0x65 || (b[i] & 0xf0) == 0x40)) {
+        i++;
+    }
+    return i;
+}
+
 static int emulate_msr_instruction(CPUState *cpu,
             const uint8_t *insn_bytes, size_t insn_len)
 {
@@ -1075,6 +1089,19 @@ static int emulate_msr_instruction(CPUState *cpu,
     CPUX86State *env = &x86_cpu->env;
     struct x86_decode decode = { 0 };
     x86_insn_stream stream = { .bytes = insn_bytes, .len = insn_len };
+    size_t op = whpx_insn_skip_prefixes(insn_bytes, insn_len);
+
+    /*
+     * Every #GP in the guest exits here, from any instruction: a misaligned
+     * SSE access, a privileged instruction in user mode, a bad segment. The
+     * decoder ends the VM on opcodes it does not know, so only decode
+     * RDMSR (0F 32) and WRMSR (0F 30); everything else is the guest's own
+     * #GP and goes back to it.
+     */
+    if (op + 1 >= insn_len || insn_bytes[op] != 0x0f ||
+        (insn_bytes[op + 1] != 0x30 && insn_bytes[op + 1] != 0x32)) {
+        return 1;
+    }
 
     whpx_get_registers(cpu, WHPX_LEVEL_FAST_RUNTIME_STATE);
     decode_instruction_stream(env, &decode, &stream);
@@ -1089,11 +1116,213 @@ static int emulate_msr_instruction(CPUState *cpu,
     return 0;
 }
 
+/*
+ * True when the instruction is a two-byte-escape SSE move (0F 10-17, 28-2B,
+ * 6F, 7F, E7) or VEX-encoded. The x86 emulator cannot execute these, so an
+ * MMIO exit on one ends the VM; log where it happened first.
+ */
+static bool whpx_insn_is_vector_move(const uint8_t *b, size_t len)
+{
+    size_t i = whpx_insn_skip_prefixes(b, len);
+
+    if (i < len && (b[i] == 0xc4 || b[i] == 0xc5)) {
+        return true;
+    }
+    if (i + 1 >= len || b[i] != 0x0f) {
+        return false;
+    }
+    switch (b[i + 1]) {
+    case 0x10 ... 0x17:
+    case 0x28 ... 0x2b:
+    case 0x6f:
+    case 0x7f:
+    case 0xe7:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void whpx_log_vector_mmio(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)
+{
+    MemoryRegionSection s = memory_region_find(get_system_memory(), ctx->Gpa, 1);
+    char bytes[16 * 3 + 1] = "";
+
+    for (int i = 0; i < ctx->InstructionByteCount && i < 16; i++) {
+        snprintf(bytes + i * 3, 4, "%02x ", ctx->InstructionBytes[i]);
+    }
+    error_report("WHPX: vector instruction on MMIO: cpu %d rip 0x%" PRIx64
+                 " %s gpa 0x%" PRIx64 " gva 0x%" PRIx64 "%s region '%s'+0x%"
+                 HWADDR_PRIx " (ram %d) bytes %s",
+                 cpu->cpu_index, (uint64_t)cpu->accel->exit_ctx.VpContext.Rip,
+                 ctx->AccessInfo.AccessType == WHvMemoryAccessWrite ? "write" :
+                 ctx->AccessInfo.AccessType == WHvMemoryAccessRead ? "read" :
+                 "execute",
+                 (uint64_t)ctx->Gpa, (uint64_t)ctx->Gva,
+                 ctx->AccessInfo.GvaValid ? "" : " (gva invalid)",
+                 s.mr ? memory_region_name(s.mr) : "<none>",
+                 s.offset_within_region,
+                 s.mr ? memory_region_is_ram(s.mr) : -1, bytes);
+    if (s.mr) {
+        memory_region_unref(s.mr);
+    }
+}
+
+/*
+ * A vector (SSE/AVX) move to guest-physical memory where nothing is mapped.
+ * Hardware completes such an access as a master abort: the write is dropped
+ * and a read returns all-ones. Windows guests do this when a user-mode
+ * mapping of a device BAR is still written while the PCI driver has memory
+ * decoding off (it sizes and moves BARs at runtime). The emulator cannot
+ * execute vector moves and would end the VM, so complete the access here
+ * and skip the instruction. Handles every store and the full 128-bit SSE
+ * loads (MOVAPS/MOVAPD, MOVUPS/MOVUPD, MOVDQA/MOVDQU); returns false for
+ * anything else, which then takes the normal path.
+ */
+static bool whpx_vector_master_abort(CPUState *cpu,
+                                     WHV_RUN_VP_EXIT_CONTEXT *exit_ctx)
+{
+    WHV_MEMORY_ACCESS_CONTEXT *ctx = &exit_ctx->MemoryAccess;
+    const uint8_t *b = ctx->InstructionBytes;
+    size_t len = ctx->InstructionByteCount, i;
+    bool long_mode = exit_ctx->VpContext.Cs.Long;
+    bool opsize = false, rep = false, repne = false, vex = false, load;
+    unsigned rex = 0, mod, rm, disp = 0;
+    uint8_t op, modrm;
+    MemoryRegionSection s;
+    WHV_REGISTER_VALUE reg = {};
+    static int reported;
+
+    /* 16-bit code has another ModRM layout; leave it to the emulator. */
+    if (!long_mode && !exit_ctx->VpContext.Cs.Default) {
+        return false;
+    }
+    for (i = 0; i < len; i++) {
+        if (long_mode && (b[i] & 0xf0) == 0x40) {
+            rex = b[i];
+            continue;
+        }
+        if (b[i] == 0x66) {
+            opsize = true;
+        } else if (b[i] == 0xf3) {
+            rep = true;
+        } else if (b[i] == 0xf2) {
+            repne = true;
+        } else if (b[i] == 0x67) {
+            if (!long_mode) {
+                return false;               /* 16-bit addressing */
+            }
+        } else if (b[i] != 0xf0 && b[i] != 0x26 && b[i] != 0x2e &&
+                   b[i] != 0x36 && b[i] != 0x3e && b[i] != 0x64 &&
+                   b[i] != 0x65) {
+            break;                          /* the opcode */
+        }
+        rex = 0;                            /* REX counts only when last */
+    }
+    if (long_mode && i < len && b[i] == 0xc5) {
+        vex = true;                         /* 2-byte VEX: map 0F */
+        i += 2;
+    } else if (long_mode && i < len && b[i] == 0xc4) {
+        if (i + 1 >= len || (b[i + 1] & 0x1f) != 1) {
+            return false;                   /* not map 0F */
+        }
+        vex = true;
+        i += 3;
+    } else if (i < len && b[i] == 0x0f) {
+        i++;
+    } else {
+        return false;
+    }
+    if (i + 1 >= len) {
+        return false;
+    }
+    op = b[i++];
+    switch (op) {
+    case 0x11: case 0x13: case 0x17: case 0x29: case 0x2b: case 0x7f:
+    case 0xe7:
+        load = false;
+        break;
+    case 0x28:
+        load = !vex;
+        break;
+    case 0x10:
+        load = !vex && !rep && !repne;
+        break;
+    case 0x6f:
+        load = !vex && (opsize || rep);
+        break;
+    default:
+        return false;
+    }
+    if (load != (ctx->AccessInfo.AccessType == WHvMemoryAccessRead) ||
+        (!load && ctx->AccessInfo.AccessType != WHvMemoryAccessWrite)) {
+        return false;
+    }
+    modrm = b[i++];
+    mod = modrm >> 6;
+    rm = modrm & 7;
+    if (mod == 3) {
+        return false;
+    }
+    if (rm == 4) {
+        if (i >= len) {
+            return false;
+        }
+        if (mod == 0 && (b[i] & 7) == 5) {
+            disp = 4;
+        }
+        i++;                                /* SIB */
+    }
+    if (mod == 0 && rm == 5) {
+        disp = 4;
+    } else if (mod == 1) {
+        disp = 1;
+    } else if (mod == 2) {
+        disp = 4;
+    }
+    i += disp;
+    if (i > len) {
+        return false;
+    }
+
+    s = memory_region_find(get_system_memory(), ctx->Gpa, 1);
+    if (s.mr) {
+        memory_region_unref(s.mr);
+        return false;                       /* a real region: not ours */
+    }
+
+    if (load) {
+        reg.Reg128.Low64 = reg.Reg128.High64 = ~0ULL;
+        whpx_set_reg(cpu, WHvX64RegisterXmm0 +
+                     (((modrm >> 3) & 7) | (rex & 4 ? 8 : 0)), reg);
+    }
+    reg.Reg128.High64 = 0;
+    reg.Reg64 = exit_ctx->VpContext.Rip + i;
+    whpx_set_reg(cpu, WHvX64RegisterRip, reg);
+
+    if (reported < 5) {
+        reported++;
+        warn_report("WHPX: vector %s at unmapped gpa 0x%" PRIx64 " (rip 0x%"
+                    PRIx64 "): completed as a master abort%s",
+                    load ? "read" : "write", (uint64_t)ctx->Gpa,
+                    (uint64_t)exit_ctx->VpContext.Rip,
+                    reported == 5 ? "; not reporting further ones" : "");
+    }
+    return true;
+}
+
 static int whpx_handle_mmio(CPUState *cpu, WHV_RUN_VP_EXIT_CONTEXT *exit_ctx)
 {
     WHV_MEMORY_ACCESS_CONTEXT *ctx = &exit_ctx->MemoryAccess;
     int ret;
 
+    if (whpx_insn_is_vector_move(ctx->InstructionBytes,
+                                 ctx->InstructionByteCount)) {
+        if (whpx_vector_master_abort(cpu, exit_ctx)) {
+            return 0;
+        }
+        whpx_log_vector_mmio(cpu, ctx);
+    }
     ret = emulate_instruction(cpu, ctx->InstructionBytes, ctx->InstructionByteCount);
     if (ret < 0) {
         error_report("failed to emulate mmio");
