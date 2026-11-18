@@ -492,6 +492,8 @@ void qorral_latency_mark(QorralLatencyMark mark);
 void qorral_latency_trace(const char *what, uint32_t arg);
 /* True while a latency probe waits for the display to change (it reads pixels). */
 bool qorral_latency_armed(void);
+/* The row of a @height rows high display whose pixel the running probe reads. */
+int qorral_latency_probe_row(int height);
 void coroutine_fn qemu_console_co_wait_update(QemuConsole *con);
 
 /* console-gl.c */

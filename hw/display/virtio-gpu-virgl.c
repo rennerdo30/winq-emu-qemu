@@ -95,6 +95,7 @@ typedef struct VirglBlobShadow {
     /* The file mapping behind buf (NULL: buf is plain heap memory). */
     HANDLE share;
     uint32_t offset;
+    uint32_t stride;
     VkRead *vk; /* borrowed from virgl_vkread_cache */
     /*
      * The blob was just flipped to zero-copy listeners on SET_SCANOUT_BLOB:
@@ -217,6 +218,38 @@ static void virgl_blob_shadow_copy(VirtIOGPU *g, VirglBlobShadow *s)
         memcpy(s->buf, src + s->offset, s->len);
     } else if (s->vk) {
         vkread_copy(s->vk, s->buf);
+    }
+}
+
+/*
+ * While a latency probe runs on a zero-copy scanout, only the row with the
+ * probe's pixel: a full copy (4 MB at 1280x800, through the GPU for host
+ * memory) took about 0.5 ms per update, twice per frame, while the guest
+ * waited for the flush, which inflated the measured latency.
+ */
+static void virgl_blob_shadow_copy_probe_row(VirtIOGPU *g, VirglBlobShadow *s)
+{
+    struct virtio_gpu_simple_resource *res;
+    uint8_t *src;
+    size_t off, len = s->stride;
+
+    res = virtio_gpu_find_resource(g, s->resource_id);
+    if (!res || !len) {
+        return;
+    }
+    off = (size_t)qorral_latency_probe_row(s->len / len) * len;
+    if (off + len > s->len) {
+        return;
+    }
+    if (res->iov_cnt) {
+        iov_to_buf(res->iov, res->iov_cnt, s->offset + off, s->buf + off, len);
+        return;
+    }
+    src = virgl_blob_host_ptr(container_of(res, struct virtio_gpu_virgl_resource, base));
+    if (src) {
+        memcpy(s->buf + off, src + s->offset + off, len);
+    } else if (s->vk) {
+        vkread_copy_range(s->vk, s->buf + off, off, len);
     }
 }
 
@@ -855,13 +888,19 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
                 sh->zero_copy =
                     qemu_console_win32_blob_flip(g->parent_obj.scanout[i].con,
                                                  blob, rf.r.x, rf.r.y,
-                                                 rf.r.width, rf.r.height) &&
-                    !qorral_latency_armed();
+                                                 rf.r.width, rf.r.height);
             }
             sh->flipped = false;
             if (sh->zero_copy && !qorral_latency_armed()) {
                 trace_virtio_gpu_blob_shadow_skip(rf.resource_id);
                 sh->stale = true; /* copied when someone reads it */
+                continue;
+            }
+            if (sh->zero_copy) {
+                virgl_blob_shadow_copy_probe_row(g, sh);
+                sh->stale = true;
+                qemu_console_update(g->parent_obj.scanout[i].con, rf.r.x, rf.r.y,
+                                    rf.r.width, rf.r.height);
                 continue;
             }
             virgl_blob_shadow_copy(g, sh);
@@ -1394,14 +1433,14 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         }
         sh->resource_id = ss.resource_id;
         sh->offset = fb.offset;
+        sh->stride = fb.stride;
         {
             const QemuWin32Blob *blob = virgl_w32blob_get(ss.resource_id, &fb,
                                                           ss.r.width, ss.r.height);
 
             /* Flip first: zero-copy listeners show the frame right away. */
             sh->zero_copy = qemu_console_win32_blob_flip(so->con, blob, 0, 0,
-                                                         ss.r.width, ss.r.height) &&
-                            !qorral_latency_armed();
+                                                         ss.r.width, ss.r.height);
             sh->flipped = blob != NULL;
         }
         if (!sh->buf || sh->len != len || !so->ds ||
@@ -1448,9 +1487,13 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
                 g_free(old_buf);
             }
             sh->stale = false;
-        } else if (sh->zero_copy) {
+        } else if (sh->zero_copy && !qorral_latency_armed()) {
             trace_virtio_gpu_blob_shadow_skip(ss.resource_id);
             sh->stale = true; /* copied when someone reads it */
+        } else if (sh->zero_copy) {
+            virgl_blob_shadow_copy_probe_row(g, sh);
+            sh->stale = true;
+            qemu_console_update_full(so->con);
         } else {
             virgl_blob_shadow_copy(g, sh);
             sh->stale = false;

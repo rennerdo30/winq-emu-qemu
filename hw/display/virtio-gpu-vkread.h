@@ -21,6 +21,8 @@ VkRead *vkread_import(const struct virgl_renderer_win32_export *e,
 
 /* Copies the current contents to dst (size bytes); waits for the GPU. */
 bool vkread_copy(VkRead *r, void *dst);
+/* Copies @len bytes from @off into the blob to @dst. */
+bool vkread_copy_range(VkRead *r, void *dst, uint64_t off, uint64_t len);
 
 void vkread_free(VkRead *r);
 

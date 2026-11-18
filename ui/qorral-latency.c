@@ -94,6 +94,11 @@ bool qorral_latency_armed(void)
     return probe.armed;
 }
 
+int qorral_latency_probe_row(int height)
+{
+    return probe.y < 0 || probe.y >= height ? height / 2 : probe.y;
+}
+
 static int64_t probe_rel(int64_t t_us)
 {
     return t_us ? t_us - probe.t0_us : 0;
@@ -194,6 +199,12 @@ void qmp_x_qorral_latency_probe(bool has_key, QKeyCode key, bool has_x,
     }
     probe.x = has_x ? x : -1;
     probe.y = has_y ? y : -1;
+    /*
+     * A zero-copy scanout's shadow surface is copied only when someone reads
+     * it, so without this it can still hold the frame of the previous probe
+     * and the first update would count as a change.
+     */
+    qemu_console_hw_update(con);
     b = probe_brightness(con, probe.x, probe.y);
     if (b < 0) {
         error_setg(errp, "the display of console %" PRId64 " cannot be read "

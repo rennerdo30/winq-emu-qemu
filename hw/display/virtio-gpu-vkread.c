@@ -410,11 +410,19 @@ fail:
 
 bool vkread_copy(VkRead *r, void *dst)
 {
+    return vkread_copy_range(r, dst, 0, r->size);
+}
+
+bool vkread_copy_range(VkRead *r, void *dst, uint64_t off, uint64_t len)
+{
     VkCommandBufferBeginInfo cbi = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
-    VkBufferCopy region = { .srcOffset = r->offset, .dstOffset = 0, .size = r->size };
+    VkBufferCopy region = { .srcOffset = r->offset + off, .dstOffset = off, .size = len };
+    if (off > r->size || len > r->size - off) {
+        return false;
+    }
     VkSubmitInfo si = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1,
@@ -433,6 +441,6 @@ bool vkread_copy(VkRead *r, void *dst)
     if (vk.vkWaitForFences(vk.dev, 1, &vk.fence, VK_TRUE, 100 * 1000 * 1000) != VK_SUCCESS) {
         return false;
     }
-    memcpy(dst, r->staging_map, r->size);
+    memcpy(dst, (const uint8_t *)r->staging_map + off, len);
     return true;
 }
