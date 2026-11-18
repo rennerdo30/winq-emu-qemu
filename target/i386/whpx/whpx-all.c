@@ -2658,7 +2658,17 @@ int whpx_vcpu_run(CPUState *cpu)
 
         case WHvRunVpExitReasonX64ApicEoi:
             assert(whpx_irqchip_in_kernel());
+            /*
+             * The vCPU runs without the BQL, but the IOAPIC state is also
+             * changed by devices raising their lines from the main loop.
+             * Unlocked, an EOI can clear Remote IRR after a device set IRR
+             * and saw Remote IRR still set, while the EOI read IRR before
+             * that write: neither side delivers, and a level-triggered line
+             * then stays asserted with nothing in service, for good.
+             */
+            bql_lock();
             ioapic_eoi_broadcast(vcpu->exit_ctx.ApicEoi.InterruptVector);
+            bql_unlock();
             break;
 
         case WHvRunVpExitReasonX64Halt:
