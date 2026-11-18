@@ -1495,7 +1495,8 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
     int ret;
 
     VIRTIO_GPU_FILL_CMD(cmd->cmd_hdr);
-    qorral_latency_trace("ctrl", cmd->cmd_hdr.type);
+    qorral_latency_trace("ctrl", cmd->cmd_hdr.type | (cmd->cmd_hdr.ctx_id & 0xff) << 16 |
+                         ((cmd->cmd_hdr.flags & VIRTIO_GPU_FLAG_FENCE) ? 0x80000000u : 0));
 
     virgl_renderer_force_ctx_0();
     switch (cmd->cmd_hdr.type) {
@@ -1629,6 +1630,8 @@ static void virgl_write_fence(void *opaque, uint32_t fence)
     VirtIOGPU *g = opaque;
     struct virtio_gpu_ctrl_command *cmd, *tmp;
 
+    qorral_latency_trace("fence-done", fence);
+
     QTAILQ_FOREACH_SAFE(cmd, &g->fenceq, next, tmp) {
         /*
          * the guest can end up emitting fences out of order
@@ -1658,6 +1661,8 @@ static void virgl_write_context_fence(void *opaque, uint32_t ctx_id,
                                       uint32_t ring_idx, uint64_t fence_id) {
     VirtIOGPU *g = opaque;
     struct virtio_gpu_ctrl_command *cmd, *tmp;
+
+    qorral_latency_trace("ctx-fence-done", ctx_id << 8 | ring_idx);
 
     QTAILQ_FOREACH_SAFE(cmd, &g->fenceq, next, tmp) {
         if (cmd->cmd_hdr.flags & VIRTIO_GPU_FLAG_INFO_RING_IDX &&

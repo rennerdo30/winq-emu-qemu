@@ -211,6 +211,7 @@ void virtio_gpu_ctrl_response(VirtIOGPU *g,
                       __func__, s, resp_len);
     }
     virtqueue_push(cmd->vq, &cmd->elem, s);
+    qorral_latency_trace("irq", cmd->cmd_hdr.type);
     virtio_notify(VIRTIO_DEVICE(g), cmd->vq);
     cmd->finished = true;
 }
@@ -1242,6 +1243,7 @@ void virtio_gpu_simple_process_cmd(VirtIOGPU *g,
 static void virtio_gpu_handle_ctrl_cb(VirtIODevice *vdev, VirtQueue *vq)
 {
     VirtIOGPU *g = VIRTIO_GPU(vdev);
+    qorral_latency_trace("kick", 0);
     qemu_bh_schedule(g->ctrl_bh);
 }
 
