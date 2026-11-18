@@ -1021,6 +1021,8 @@ static void dbus_win32_blob_flip(DisplayChangeListener *dcl,
             g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, blob->driver_uuid,
                                       sizeof(blob->driver_uuid), 1),
             blob->offset, blob->width, blob->height, blob->stride, blob->format,
+            g_variant_new_fixed_array(G_VARIANT_TYPE_UINT32, blob->image,
+                                      blob->n_image, sizeof(uint32_t)),
             G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
         g_hash_table_insert(ddl->vk_sent, GUINT_TO_POINTER(blob->resource_id),
                             GUINT_TO_POINTER(blob->generation + 1));
