@@ -179,6 +179,8 @@ struct VirtIOGPUBaseClass {
     VirtioDeviceClass parent;
 
     void (*gl_flushed)(VirtIOGPUBase *g);
+    /* optional: bring the display surfaces up to date (gfx_update) */
+    void (*update_display)(VirtIOGPUBase *g);
 };
 
 #define VIRTIO_GPU_BASE_PROPERTIES(_state, _conf)                       \
@@ -412,6 +414,8 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
                                   struct virtio_gpu_ctrl_command *cmd);
 void virtio_gpu_virgl_fence_poll(VirtIOGPU *g);
 void virtio_gpu_virgl_reset_scanout(VirtIOGPU *g);
+/* Brings display surfaces the zero-copy path left stale up to date. */
+void virtio_gpu_virgl_update_display(VirtIOGPU *g);
 GArray *virtio_gpu_virgl_get_capsets(VirtIOGPU *g);
 void virtio_gpu_virgl_reset_async_fences(VirtIOGPU *g);
 void virtio_gpu_virgl_resource_destroy(VirtIOGPU *g,

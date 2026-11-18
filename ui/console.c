@@ -1080,21 +1080,27 @@ void qemu_console_gl_release_dmabuf(QemuConsole *con,
 }
 
 #ifdef WIN32
-void qemu_console_win32_blob_flip(QemuConsole *con, const QemuWin32Blob *blob,
+bool qemu_console_win32_blob_flip(QemuConsole *con, const QemuWin32Blob *blob,
                                   int x, int y, int w, int h)
 {
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
+    bool all_zero_copy = blob != NULL;
 
     if (!blob && !con->win32_blob) {
-        return;
+        return false;
     }
     con->win32_blob = blob;
     QLIST_FOREACH(dcl, &s->listeners, next) {
-        if (con == dcl->con && dcl->ops->dpy_win32_blob_flip) {
-            dcl->ops->dpy_win32_blob_flip(dcl, blob, x, y, w, h);
+        if (con != dcl->con) {
+            continue;
+        }
+        if (!dcl->ops->dpy_win32_blob_flip ||
+            !dcl->ops->dpy_win32_blob_flip(dcl, blob, x, y, w, h)) {
+            all_zero_copy = false;
         }
     }
+    return all_zero_copy;
 }
 
 void qemu_console_win32_blob_forget(QemuConsole *con, uint32_t resource_id)

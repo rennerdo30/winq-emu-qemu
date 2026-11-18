@@ -99,6 +99,12 @@ typedef struct VirglBlobShadow {
      * the guest's RESOURCE_FLUSH of the same frame that follows adds nothing.
      */
     bool flipped;
+    /*
+     * Every listener shows the blob itself (zero copy), so the shadow is
+     * not refreshed per frame; stale: it must be before anyone reads it.
+     */
+    bool zero_copy;
+    bool stale;
 } VirglBlobShadow;
 
 static VirglBlobShadow virgl_blob_shadow[VIRTIO_GPU_MAX_SCANOUTS];
@@ -199,6 +205,7 @@ static void virgl_blob_shadow_copy(VirtIOGPU *g, VirglBlobShadow *s)
     if (!res) {
         return;
     }
+    trace_virtio_gpu_blob_shadow_copy(s->resource_id);
     if (res->iov_cnt) {
         iov_to_buf(res->iov, res->iov_cnt, s->offset, s->buf, s->len);
         return;
@@ -302,6 +309,8 @@ static void virgl_blob_scanout_off(VirtIOGPU *g, int idx)
 
     s->vk = NULL; /* the cache keeps the import */
     s->active = false;
+    s->zero_copy = false;
+    s->stale = false;
     if (con) {
         qemu_console_win32_blob_flip(con, NULL, 0, 0, 0, 0);
     }
@@ -837,17 +846,26 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
 #ifdef _WIN32
         if (virgl_blob_shadow[i].active &&
             virgl_blob_shadow[i].resource_id == rf.resource_id) {
+            VirglBlobShadow *sh = &virgl_blob_shadow[i];
             const QemuWin32Blob *blob = virgl_w32blob_lookup(rf.resource_id);
 
-            virgl_blob_shadow_copy(g, &virgl_blob_shadow[i]);
+            if (blob && !sh->flipped) {
+                sh->zero_copy =
+                    qemu_console_win32_blob_flip(g->parent_obj.scanout[i].con,
+                                                 blob, rf.r.x, rf.r.y,
+                                                 rf.r.width, rf.r.height) &&
+                    !qorral_latency_armed();
+            }
+            sh->flipped = false;
+            if (sh->zero_copy && !qorral_latency_armed()) {
+                trace_virtio_gpu_blob_shadow_skip(rf.resource_id);
+                sh->stale = true; /* copied when someone reads it */
+                continue;
+            }
+            virgl_blob_shadow_copy(g, sh);
+            sh->stale = false;
             qemu_console_update(g->parent_obj.scanout[i].con, rf.r.x, rf.r.y,
                            rf.r.width, rf.r.height);
-            if (blob && !virgl_blob_shadow[i].flipped) {
-                qemu_console_win32_blob_flip(g->parent_obj.scanout[i].con, blob,
-                                             rf.r.x, rf.r.y,
-                                             rf.r.width, rf.r.height);
-            }
-            virgl_blob_shadow[i].flipped = false;
             continue;
         }
 #endif
@@ -1374,6 +1392,16 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         }
         sh->resource_id = ss.resource_id;
         sh->offset = fb.offset;
+        {
+            const QemuWin32Blob *blob = virgl_w32blob_get(ss.resource_id, &fb,
+                                                          ss.r.width, ss.r.height);
+
+            /* Flip first: zero-copy listeners show the frame right away. */
+            sh->zero_copy = qemu_console_win32_blob_flip(so->con, blob, 0, 0,
+                                                         ss.r.width, ss.r.height) &&
+                            !qorral_latency_armed();
+            sh->flipped = blob != NULL;
+        }
         if (!sh->buf || sh->len != len || !so->ds ||
             surface_data(so->ds) != (void *)sh->buf ||
             surface_width(so->ds) != ss.r.width ||
@@ -1393,20 +1421,17 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
             qemu_console_gl_scanout_disable(so->con);
             qemu_console_set_surface(so->con, so->ds);
             g_free(old_buf); /* the old surface was replaced above */
+            sh->stale = false;
+        } else if (sh->zero_copy) {
+            trace_virtio_gpu_blob_shadow_skip(ss.resource_id);
+            sh->stale = true; /* copied when someone reads it */
         } else {
             virgl_blob_shadow_copy(g, sh);
+            sh->stale = false;
             qemu_console_update_full(so->con);
         }
         sh->active = true;
         virtio_gpu_update_scanout(g, ss.scanout_id, &res->base, &fb, &ss.r);
-        {
-            const QemuWin32Blob *blob = virgl_w32blob_get(ss.resource_id, &fb,
-                                                          ss.r.width, ss.r.height);
-
-            qemu_console_win32_blob_flip(so->con, blob, 0, 0,
-                                         ss.r.width, ss.r.height);
-            sh->flipped = blob != NULL;
-        }
         return;
     }
 #endif
@@ -1420,6 +1445,22 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
     virtio_gpu_update_scanout(g, ss.scanout_id, &res->base, &fb, &ss.r);
 }
 #endif
+
+void virtio_gpu_virgl_update_display(VirtIOGPU *g)
+{
+#ifdef _WIN32
+    int i;
+
+    for (i = 0; i < g->parent_obj.conf.max_outputs && i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
+        VirglBlobShadow *sh = &virgl_blob_shadow[i];
+
+        if (sh->active && sh->stale && sh->buf) {
+            virgl_blob_shadow_copy(g, sh);
+            sh->stale = false;
+        }
+    }
+#endif
+}
 
 void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
                                       struct virtio_gpu_ctrl_command *cmd)
