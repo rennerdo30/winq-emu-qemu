@@ -234,6 +234,20 @@
 #
 # @after: probe pixel brightness at the last update read
 #
+# @key-read-us: microseconds from the key press until the guest first
+#     read from the keyboard device (0: not seen)
+#
+# @first-present-us: microseconds until the guest first presented (a
+#     scanout flush or flip) after the key press (0: none)
+#
+# @present-us: microseconds until the guest's last present before the
+#     matching display update (0: none, or timed out)
+#
+# @update-start-us: microseconds until the matching display update
+#     started, before the display listeners ran (0: timed out)
+#
+# @presents: presents (scanout flushes and flips) seen while waiting
+#
 # Features:
 #
 # @unstable: Qorral extension for latency measurements.
@@ -242,7 +256,9 @@
 ##
 { 'event': 'QORRAL_LATENCY',
   'data': { 'elapsed-us': 'int', 'updates': 'int', 'timed-out': 'bool',
-            'before': 'int', 'after': 'int' },
+            'before': 'int', 'after': 'int', 'key-read-us': 'int',
+            'first-present-us': 'int', 'present-us': 'int',
+            'update-start-us': 'int', 'presents': 'int' },
   'features': [ 'unstable' ] }
 
 ##

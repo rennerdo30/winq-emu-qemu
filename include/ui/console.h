@@ -410,6 +410,23 @@ bool qemu_console_scanout_read_pixel(QemuConsole *con, int x, int y,
 /* Called after every display update of a console (the latency probe). */
 typedef void (*QemuConsoleUpdateHook)(QemuConsole *con);
 void qemu_console_set_update_hook(QemuConsoleUpdateHook fn);
+
+/*
+ * Stage marks for the latency probe (ui/qorral-latency.c). Each costs one
+ * branch unless a probe is running. Call with the BQL held.
+ */
+typedef enum QorralLatencyMark {
+    QORRAL_LATENCY_KEY_READ,    /* the guest read a byte from the keyboard */
+    QORRAL_LATENCY_PRESENT,     /* the guest presented: a scanout flush or flip */
+    QORRAL_LATENCY_UPDATE,      /* a display update starts (before listeners) */
+} QorralLatencyMark;
+void qorral_latency_mark(QorralLatencyMark mark);
+/*
+ * With QORRAL_LATENCY_TRACE=1 in QEMU's environment, logs @what and @arg
+ * with the time since the key press while a probe runs (stage marks and
+ * display updates are logged too).
+ */
+void qorral_latency_trace(const char *what, uint32_t arg);
 void coroutine_fn qemu_console_co_wait_update(QemuConsole *con);
 
 /* console-gl.c */

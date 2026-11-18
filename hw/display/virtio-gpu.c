@@ -610,6 +610,7 @@ static void virtio_gpu_resource_flush(VirtIOGPU *g,
     virtio_gpu_bswap_32(&rf, sizeof(rf));
     trace_virtio_gpu_cmd_res_flush(rf.resource_id,
                                    rf.r.width, rf.r.height, rf.r.x, rf.r.y);
+    qorral_latency_mark(QORRAL_LATENCY_PRESENT);
 
     res = virtio_gpu_find_check_resource(g, rf.resource_id,
                                          __func__, &cmd->error);

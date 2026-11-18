@@ -555,6 +555,9 @@ uint32_t ps2_read_data(PS2State *s)
         }
         val = q->data[index];
     } else {
+        if (object_dynamic_cast(OBJECT(s), TYPE_PS2_KBD_DEVICE)) {
+            qorral_latency_mark(QORRAL_LATENCY_KEY_READ);
+        }
         val = q->data[q->rptr];
         if (++q->rptr == PS2_BUFFER_SIZE) {
             q->rptr = 0;

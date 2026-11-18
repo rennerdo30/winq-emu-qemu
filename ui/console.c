@@ -158,6 +158,7 @@ void qemu_console_hw_update(QemuConsole *con)
     if (!con) {
         return;
     }
+    qorral_latency_trace("hw-update", 0);
     if (!con->hw_ops->gfx_update || con->hw_ops->gfx_update(con->hw)) {
         qemu_console_hw_update_done(con);
     }
@@ -753,6 +754,7 @@ void qemu_console_update(QemuConsole *con, int x, int y, int w, int h)
     if (w <= 0 || h <= 0) {
         return;
     }
+    qorral_latency_mark(QORRAL_LATENCY_UPDATE);
 
     dpy_gfx_update_texture(con, con->surface, x, y, w, h);
     QLIST_FOREACH(dcl, &s->listeners, next) {
@@ -1077,6 +1079,7 @@ void qemu_console_gl_update(QemuConsole *con,
     DisplayChangeListener *dcl;
 
     assert(con->gl);
+    qorral_latency_mark(QORRAL_LATENCY_UPDATE);
 
     qemu_console_hw_gl_block(con, true);
     QLIST_FOREACH(dcl, &s->listeners, next) {
