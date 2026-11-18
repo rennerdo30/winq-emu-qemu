@@ -727,6 +727,7 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
     VIRTIO_GPU_FILL_CMD(rf);
     trace_virtio_gpu_cmd_res_flush(rf.resource_id,
                                    rf.r.width, rf.r.height, rf.r.x, rf.r.y);
+    qorral_latency_mark(QORRAL_LATENCY_PRESENT);
 
     for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
         if (g->parent_obj.scanout[i].resource_id != rf.resource_id) {
@@ -756,6 +757,7 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
     VIRTIO_GPU_FILL_CMD(ss);
     trace_virtio_gpu_cmd_set_scanout(ss.scanout_id, ss.resource_id,
                                      ss.r.width, ss.r.height, ss.r.x, ss.r.y);
+    qorral_latency_mark(QORRAL_LATENCY_PRESENT);
 
     if (ss.scanout_id >= g->parent_obj.conf.max_outputs) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: illegal scanout id specified %d",
@@ -1189,6 +1191,7 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
     trace_virtio_gpu_cmd_set_scanout_blob(ss.scanout_id, ss.resource_id,
                                           ss.r.width, ss.r.height, ss.r.x,
                                           ss.r.y);
+    qorral_latency_mark(QORRAL_LATENCY_PRESENT);
 
     if (ss.scanout_id >= g->parent_obj.conf.max_outputs) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: illegal scanout id specified %d",
@@ -1308,6 +1311,7 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
     int ret;
 
     VIRTIO_GPU_FILL_CMD(cmd->cmd_hdr);
+    qorral_latency_trace("ctrl", cmd->cmd_hdr.type);
 
     virgl_renderer_force_ctx_0();
     switch (cmd->cmd_hdr.type) {
