@@ -89,6 +89,11 @@ void qorral_latency_mark(QorralLatencyMark mark)
     }
 }
 
+bool qorral_latency_armed(void)
+{
+    return probe.armed;
+}
+
 static int64_t probe_rel(int64_t t_us)
 {
     return t_us ? t_us - probe.t0_us : 0;

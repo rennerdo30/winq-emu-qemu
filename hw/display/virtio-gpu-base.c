@@ -85,6 +85,12 @@ static void virtio_gpu_invalidate_display(void *opaque)
 
 static bool virtio_gpu_update_display(void *opaque)
 {
+    VirtIOGPUBase *g = opaque;
+    VirtIOGPUBaseClass *vgc = VIRTIO_GPU_BASE_GET_CLASS(g);
+
+    if (vgc->update_display) {
+        vgc->update_display(g);
+    }
     return true;
 }
 

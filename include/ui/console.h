@@ -274,8 +274,12 @@ typedef struct DisplayChangeListenerOps {
                           uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
 #ifdef WIN32
-    /* optional: @blob is shown (NULL: no more blob scanouts); x, y, w, h changed */
-    void (*dpy_win32_blob_flip)(DisplayChangeListener *dcl,
+    /*
+     * optional: @blob is shown (NULL: no more blob scanouts); x, y, w, h
+     * changed. Returns true when this listener shows the blob itself and
+     * needs no pixels on the other paths.
+     */
+    bool (*dpy_win32_blob_flip)(DisplayChangeListener *dcl,
                                 const QemuWin32Blob *blob,
                                 int x, int y, int w, int h);
     /* optional: the guest freed this blob */
@@ -350,7 +354,12 @@ void qemu_console_gl_scanout_disable(QemuConsole *con);
  * current blob for listeners that attach later: the producer must keep it
  * valid until it calls qemu_console_win32_blob_forget() or flips to another.
  */
-void qemu_console_win32_blob_flip(QemuConsole *con, const QemuWin32Blob *blob,
+/*
+ * Returns true when no listener of @con needs the pixels of this frame (all
+ * show the blob themselves, or there are none): the producer may then skip
+ * preparing them and do it on demand (gfx_update, e.g. for a screendump).
+ */
+bool qemu_console_win32_blob_flip(QemuConsole *con, const QemuWin32Blob *blob,
                                   int x, int y, int w, int h);
 void qemu_console_win32_blob_forget(QemuConsole *con, uint32_t resource_id);
 const QemuWin32Blob *qemu_console_get_win32_blob(QemuConsole *con);
@@ -481,6 +490,8 @@ void qorral_latency_mark(QorralLatencyMark mark);
  * display updates are logged too).
  */
 void qorral_latency_trace(const char *what, uint32_t arg);
+/* True while a latency probe waits for the display to change (it reads pixels). */
+bool qorral_latency_armed(void);
 void coroutine_fn qemu_console_co_wait_update(QemuConsole *con);
 
 /* console-gl.c */

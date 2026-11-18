@@ -131,6 +131,21 @@ dbus_gl_scanout_update(DisplayChangeListener *dcl,
 {
 }
 
+#ifdef WIN32
+/* This listener only tracks the console size: it never needs pixels. */
+static bool
+dbus_win32_blob_flip(DisplayChangeListener *dcl, const QemuWin32Blob *blob,
+                     int x, int y, int w, int h)
+{
+    DBusDisplayConsole *ddc = container_of(dcl, DBusDisplayConsole, dcl);
+
+    if (blob) {
+        dbus_display_console_set_size(ddc, blob->width, blob->height);
+    }
+    return true;
+}
+#endif
+
 const DisplayChangeListenerOps dbus_console_dcl_ops = {
     .dpy_name                = "dbus-console",
     .dpy_gfx_switch          = dbus_gfx_switch,
@@ -139,6 +154,9 @@ const DisplayChangeListenerOps dbus_console_dcl_ops = {
     .dpy_gl_scanout_texture  = dbus_gl_scanout_texture,
     .dpy_gl_scanout_dmabuf   = dbus_gl_scanout_dmabuf,
     .dpy_gl_update           = dbus_gl_scanout_update,
+#ifdef WIN32
+    .dpy_win32_blob_flip     = dbus_win32_blob_flip,
+#endif
 };
 
 static void

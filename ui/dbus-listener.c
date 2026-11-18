@@ -759,6 +759,10 @@ static void dbus_gl_refresh(DisplayChangeListener *dcl)
 {
     DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
 
+    /* A client showing blobs gets its frames on flips: pull no pixels. */
+    if (ddl_shows_blobs(ddl)) {
+        return;
+    }
     qemu_console_hw_update(dcl->con);
 
     if (!ddl->ds || qemu_console_is_gl_blocked(ddl->dcl.con)) {
@@ -976,7 +980,7 @@ static void dbus_cursor_define(DisplayChangeListener *dcl,
 
 #ifdef CONFIG_OPENGL
 #ifdef WIN32
-static void dbus_win32_blob_flip(DisplayChangeListener *dcl,
+static bool dbus_win32_blob_flip(DisplayChangeListener *dcl,
                                  const QemuWin32Blob *blob,
                                  int x, int y, int w, int h)
 {
@@ -984,7 +988,7 @@ static void dbus_win32_blob_flip(DisplayChangeListener *dcl,
     QemuDBusDisplay1ListenerWin32VulkanMemory *p = ddl->vk_proxy;
 
     if (!p) {
-        return;
+        return false;
     }
     if (!blob) {
         if (ddl->vk_active) {
@@ -998,7 +1002,7 @@ static void dbus_win32_blob_flip(DisplayChangeListener *dcl,
                 dcl->ops->dpy_gfx_switch(dcl, ddl->ds);
             }
         }
-        return;
+        return false;
     }
     if (GPOINTER_TO_UINT(g_hash_table_lookup(ddl->vk_sent,
                                              GUINT_TO_POINTER(blob->resource_id))) !=
@@ -1010,7 +1014,7 @@ static void dbus_win32_blob_flip(DisplayChangeListener *dcl,
                              DUPLICATE_SAME_ACCESS)) {
             g_autofree char *msg = g_win32_error_message(GetLastError());
             g_debug("Failed to DuplicateHandle for a blob: %s", msg);
-            return;
+            return false;
         }
         /* No callback: sent without expecting a reply; QEMU never waits. */
         qemu_dbus_display1_listener_win32_vulkan_memory_call_scanout_blob(
@@ -1031,6 +1035,7 @@ static void dbus_win32_blob_flip(DisplayChangeListener *dcl,
     qemu_dbus_display1_listener_win32_vulkan_memory_call_flip_blob(
         p, blob->resource_id, x, y, w, h, G_DBUS_CALL_FLAGS_NONE, -1,
         NULL, NULL, NULL);
+    return true;
 }
 
 static void dbus_win32_blob_forget(DisplayChangeListener *dcl,

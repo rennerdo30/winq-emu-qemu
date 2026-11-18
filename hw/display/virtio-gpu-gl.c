@@ -54,6 +54,11 @@ static void virtio_gpu_gl_update_cursor_data(VirtIOGPU *g,
     free(data);
 }
 
+static void virtio_gpu_gl_update_display(VirtIOGPUBase *b)
+{
+    virtio_gpu_virgl_update_display(VIRTIO_GPU(b));
+}
+
 static void virtio_gpu_gl_flushed(VirtIOGPUBase *b)
 {
     VirtIOGPU *g = VIRTIO_GPU(b);
@@ -217,6 +222,7 @@ static void virtio_gpu_gl_class_init(ObjectClass *klass, const void *data)
     VirtIOGPUClass *vgc = VIRTIO_GPU_CLASS(klass);
 
     vbc->gl_flushed = virtio_gpu_gl_flushed;
+    vbc->update_display = virtio_gpu_gl_update_display;
     vgc->handle_ctrl = virtio_gpu_gl_handle_ctrl;
     vgc->process_cmd = virtio_gpu_virgl_process_cmd;
     vgc->update_cursor_data = virtio_gpu_gl_update_cursor_data;
