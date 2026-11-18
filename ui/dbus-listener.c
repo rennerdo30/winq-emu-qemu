@@ -85,6 +85,12 @@ struct _DBusDisplayListener {
     GHashTable *vk_sent;
     /* the client shows blobs: no pixels go out on the other paths */
     bool vk_active;
+    /*
+     * GL listener, 2D surface, shared-memory client: the client reads the
+     * surface's own mapping and gets UpdateMap per damage, with no GL
+     * texture round trip and no wait for the GL refresh.
+     */
+    bool map_direct;
     HANDLE peer_process;
     ID3D11Texture2D *d3d_texture;
 #ifdef CONFIG_OPENGL
@@ -655,6 +661,7 @@ static void dbus_scanout_texture(DisplayChangeListener *dcl,
 #endif
 
 #ifdef WIN32
+    ddl->map_direct = false; /* a GL texture now: the GL paths send it */
     /* there must be a matching gfx_switch before */
     assert(surface_width(ddl->ds) == w);
     assert(surface_height(ddl->ds) == h);
@@ -801,6 +808,12 @@ static void dbus_gl_gfx_update(DisplayChangeListener *dcl,
 {
     DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
 
+#ifdef WIN32
+    if (ddl->map_direct) {
+        dbus_gfx_update(dcl, x, y, w, h); /* UpdateMap, right away */
+        return;
+    }
+#endif
 #ifdef CONFIG_PIXMAN
     pixman_region32_t rect_region;
     pixman_region32_init_rect(&rect_region, x, y, w, h);
@@ -920,6 +933,18 @@ static void dbus_gl_gfx_switch(DisplayChangeListener *dcl,
 
     ddl->ds = new_surface;
     ddl->ds_share = SHARE_KIND_NONE;
+#ifdef WIN32
+    ddl->map_direct = false;
+    /*
+     * A client without D3D11 sharing reads a shareable 2D surface in place:
+     * ScanoutMap now, UpdateMap per damage (dbus_gl_gfx_update).
+     */
+    if (ddl->ds && !ddl_shows_blobs(ddl) && !ddl->d3d11_proxy &&
+        ddl->ds->share_handle && dbus_scanout_map(ddl)) {
+        ddl->map_direct = true;
+        return;
+    }
+#endif
     if (ddl->ds && !ddl_shows_blobs(ddl)) {
         int width = surface_width(ddl->ds);
         int height = surface_height(ddl->ds);

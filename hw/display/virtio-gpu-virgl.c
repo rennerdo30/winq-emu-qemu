@@ -92,6 +92,8 @@ typedef struct VirglBlobShadow {
     uint32_t resource_id;
     uint8_t *buf;
     size_t len;
+    /* The file mapping behind buf (NULL: buf is plain heap memory). */
+    HANDLE share;
     uint32_t offset;
     VkRead *vk; /* borrowed from virgl_vkread_cache */
     /*
@@ -1408,19 +1410,43 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
             surface_height(so->ds) != ss.r.height ||
             surface_stride(so->ds) != fb.stride ||
             surface_format(so->ds) != fb.format) {
+            HANDLE old_share = sh->share;
+            Error *err = NULL;
+
             old_buf = sh->buf;
-            sh->buf = g_malloc0(len);
+            /*
+             * A shareable mapping, so a shared-memory client (Win32.Map, the
+             * remote-session console) reads the pixels in place instead of
+             * receiving each update inside a D-Bus message.
+             */
+            sh->buf = qemu_win32_map_alloc(len, &sh->share, &err);
+            if (!sh->buf) {
+                warn_report_err(err);
+                sh->share = NULL;
+                sh->buf = g_malloc0(len);
+            }
             sh->len = len;
             virgl_blob_shadow_copy(g, sh);
             img = pixman_image_create_bits(fb.format, ss.r.width, ss.r.height,
                                            (uint32_t *)sh->buf, fb.stride);
             so->ds = qemu_create_displaysurface_pixman(img);
             pixman_image_unref(img);
+            if (sh->share) {
+                qemu_displaysurface_set_share_handle(so->ds, sh->share, 0);
+            }
             /* Leave GL scanout mode (a virgl scanout during boot set it), or
              * a GL display keeps drawing the old texture and ignores us. */
             qemu_console_gl_scanout_disable(so->con);
             qemu_console_set_surface(so->con, so->ds);
-            g_free(old_buf); /* the old surface was replaced above */
+            /* The old surface was replaced above; clients hold their own handles. */
+            if (old_share) {
+                qemu_win32_map_free(old_buf, old_share, &err);
+                if (err) {
+                    warn_report_err(err);
+                }
+            } else {
+                g_free(old_buf);
+            }
             sh->stale = false;
         } else if (sh->zero_copy) {
             trace_virtio_gpu_blob_shadow_skip(ss.resource_id);
